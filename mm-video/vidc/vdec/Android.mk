@@ -20,8 +20,10 @@ libOmxVdec-def += -UENABLE_DEBUG_LOW
 libOmxVdec-def += -DENABLE_DEBUG_HIGH
 libOmxVdec-def += -DENABLE_DEBUG_ERROR
 libOmxVdec-def += -UMULTI_DEC_INST
+libOmxVdec-def += -UINPUT_BUFFER_LOG
+libOmxVdec-def += -UOUTPUT_BUFFER_LOG
 libOmxVdec-def += -DMAX_RES_720P
-
+libOmxVdec-def += -DCONFIG_MSM_MDP40
 # ---------------------------------------------------------------------------------
 # 			Make the Shared library (libOmxVdec)
 # ---------------------------------------------------------------------------------
@@ -37,7 +39,7 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_CFLAGS		:= $(libOmxVdec-def)
 LOCAL_C_INCLUDES	:= $(libmm-vdec-inc)
 
-LOCAL_SHARED_LIBRARIES	:= liblog libutils libbinder
+LOCAL_SHARED_LIBRARIES  := liblog libutils libbinder libcutils
 
 LOCAL_SRC_FILES         := src/frameparser.cpp
 LOCAL_SRC_FILES         += src/h264_utils.cpp
