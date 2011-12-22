@@ -16,6 +16,9 @@
 
 ifeq ($(TARGET_BOARD_PLATFORM),msm8660)
 LOCAL_PATH := $(call my-dir)
+
+ifneq ($(BOARD_USES_QCOM_LEGACY),true)
+
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES := \
@@ -36,4 +39,7 @@ LOCAL_SHARED_LIBRARIES :=       \
 LOCAL_MODULE := libstagefrighthw
 LOCAL_MODULE_TAGS := optional
 include $(BUILD_SHARED_LIBRARY)
+
+endif
+
 endif

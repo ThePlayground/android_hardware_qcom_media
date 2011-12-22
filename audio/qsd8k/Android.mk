@@ -3,6 +3,8 @@ ifneq ($(BUILD_TINY_ANDROID),true)
 
 LOCAL_PATH := $(call my-dir)
 
+ifneq ($(BOARD_USES_QCOM_LEGACY),true)
+
 include $(CLEAR_VARS)
 
 LOCAL_MODULE:= audio_policy.$(TARGET_BOARD_PLATFORM)
@@ -49,6 +51,8 @@ LOCAL_CFLAGS += -fno-short-enums
 #endif
 
 include $(BUILD_SHARED_LIBRARY)
+
+endif
 
 endif # not BUILD_TINY_ANDROID
 

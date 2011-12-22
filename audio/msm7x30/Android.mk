@@ -5,6 +5,8 @@
 
 LOCAL_PATH := $(call my-dir)
 
+ifneq ($(BOARD_USES_QCOM_LEGACY),true)
+
 include $(CLEAR_VARS)
 
 ifeq ($(BOARD_USES_QCOM_HARDWARE),true)
@@ -103,3 +105,5 @@ endif
 LOCAL_C_INCLUDES := hardware/libhardware_legacy/audio
 
 include $(BUILD_SHARED_LIBRARY)
+
+endif
