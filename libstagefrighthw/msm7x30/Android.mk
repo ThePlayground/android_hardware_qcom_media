@@ -14,12 +14,11 @@
 # limitations under the License.
 #
 
+ifneq ($(BOARD_USES_QCOM_LEGACY),true)
+
 ifeq ($(TARGET_BOARD_PLATFORM),msm7x30)
 
 LOCAL_PATH := $(call my-dir)
-
-ifneq ($(BOARD_USES_QCOM_LEGACY),true)
-
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES := \

@@ -4,10 +4,9 @@
 #ENABLE_AUDIO_DUMP := true
 
 LOCAL_PATH := $(call my-dir)
+include $(CLEAR_VARS)
 
 ifneq ($(BOARD_USES_QCOM_LEGACY),true)
-
-include $(CLEAR_VARS)
 
 ifeq ($(BOARD_USES_QCOM_HARDWARE),true)
     LOCAL_CFLAGS += -DQCOM_HARDWARE

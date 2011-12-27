@@ -2,10 +2,9 @@
 ifneq ($(BUILD_TINY_ANDROID),true)
 
 LOCAL_PATH := $(call my-dir)
+include $(CLEAR_VARS)
 
 ifneq ($(BOARD_USES_QCOM_LEGACY),true)
-
-include $(CLEAR_VARS)
 
 LOCAL_MODULE:= audio_policy.$(TARGET_BOARD_PLATFORM)
 LOCAL_MODULE_PATH := $(TARGET_OUT_SHARED_LIBRARIES)/hw

@@ -1,9 +1,8 @@
+ifneq ($(BOARD_USES_QCOM_LEGACY),true)
+
 ifeq ($(BOARD_USES_QCOM_LIBRPC),true)
 
 LOCAL_PATH:= $(call my-dir)
-
-ifneq ($(BOARD_USES_QCOM_LEGACY),true)
-
 include $(CLEAR_VARS)
 
 LOCAL_SRC_FILES:= xdr.c rpc.c svc.c clnt.c ops.c svc_clnt_common.c
