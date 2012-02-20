@@ -9,8 +9,7 @@ LOCAL_SRC_FILES:=       \
 
 LOCAL_C_INCLUDES:= \
     $(LOCAL_PATH)/inc \
-    $(TOP)/vendor/qcom-opensource/omx/mm-core/omxcore/inc
-#    $(TARGET_OUT_HEADERS)/mm-core/omxcore
+    $(TOP)/hardware/qcom/media/mm-core/omxcore/inc
 
 LOCAL_PRELINK_MODULE:= false
 
