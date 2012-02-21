@@ -24,7 +24,7 @@ libOmxVdec-def += -DENABLE_DEBUG_ERROR
 libOmxVdec-def += -UINPUT_BUFFER_LOG
 libOmxVdec-def += -UOUTPUT_BUFFER_LOG
 
-ifeq ($(TARGET_BOARD_PLATFORM),msm7630)
+ifeq ($(TARGET_BOARD_PLATFORM),msm7x30)
 libOmxVdec-def += -DMAX_RES_720P
 libOmxVdec-def += -UPROCESS_EXTRADATA_IN_OUTPUT_PORT
 endif

@@ -23,7 +23,7 @@ LDFLAGS_SO += -shared
 # linker flags
 LDFLAGS := -L$(SYSROOTLIB_DIR)
 
-# hard coding target for 7630
+# hard coding target for 7x30
 TARGET := 7630
 
 # ---------------------------------------------------------------------------------
