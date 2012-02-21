@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2009, Code Aurora Forum. All rights reserved.
+Copyright (c) 2009-2011, Code Aurora Forum. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -85,6 +85,10 @@ struct OMX_QCOM_PARAM_MEMMAPENTRYTYPE
 };
 
 #define QOMX_VIDEO_IntraRefreshRandom (OMX_VIDEO_IntraRefreshVendorStartUnused + 0)
+
+#define QOMX_VIDEO_BUFFERFLAG_BFRAME 0x00100000
+
+#define QOMX_VIDEO_BUFFERFLAG_EOSEQ  0x00200000
 
 #define OMX_QCOM_PORTDEFN_EXTN   "OMX.QCOM.index.param.portdefn"
 /* Allowed APIs on the above Index: OMX_GetParameter() and OMX_SetParameter() */
@@ -261,7 +265,8 @@ enum OMX_QCOM_VIDEO_CODINGTYPE
     OMX_QCOM_VIDEO_CodingWMV9 = 0x7FA30C01,
     QOMX_VIDEO_CodingDivx = 0x7FA30C02,     /**< Value when coding is Divx */
     QOMX_VIDEO_CodingSpark = 0x7FA30C03,     /**< Value when coding is Sorenson Spark */
-    QOMX_VIDEO_CodingVp = 0x7FA30C04
+    QOMX_VIDEO_CodingVp = 0x7FA30C04,
+    QOMX_VIDEO_CodingVp8 = 0x7FA30C05
 };
 
 enum OMX_QCOM_EXTN_INDEXTYPE
@@ -324,7 +329,28 @@ enum OMX_QCOM_EXTN_INDEXTYPE
 
     OMX_QcomIndexParamInterlaceExtraData = 0x7F000014,
 
-    OMX_QcomIndexParamH264TimeInfo = 0x7F000015
+    OMX_QcomIndexParamH264TimeInfo = 0x7F000015,
+
+    OMX_QcomIndexParamIndexExtraDataType = 0x7F000016,
+
+    OMX_GoogleAndroidIndexEnableAndroidNativeBuffers = 0x7F000017,
+
+    OMX_GoogleAndroidIndexUseAndroidNativeBuffer = 0x7F000018,
+
+    OMX_GoogleAndroidIndexGetAndroidNativeBufferUsage = 0x7F000019,
+
+    /*"OMX.QCOM.index.config.video.QPRange" */
+    OMX_QcomIndexConfigVideoQPRange = 0x7F00001A,
+
+    /*"OMX.QCOM.index.param.EnableTimeStampReoder"*/
+    OMX_QcomIndexParamEnableTimeStampReorder = 0x7F00001B,
+
+    /*"OMX.google.android.index.storeMetaDataInBuffers"*/
+    OMX_QcomIndexParamVideoEncodeMetaBufferMode = 0x7F00001C,
+
+    /*"OMX.google.android.index.useAndroidNativeBuffer2"*/
+    OMX_GoogleAndroidIndexUseAndroidNativeBuffer2 = 0x7F00001D
+
 };
 
 /**
@@ -521,13 +547,46 @@ typedef struct OMX_QCOM_PANSCAN
    OMX_QCOMRectangle window[MAX_PAN_SCAN_WINDOWS];
 } OMX_QCOM_PANSCAN;
 
+typedef struct OMX_QCOM_ASPECT_RATIO
+{
+   OMX_U32 aspectRatioX;
+   OMX_U32 aspectRatioY;
+} OMX_QCOM_ASPECT_RATIO;
+
+typedef struct OMX_QCOM_FRAME_PACK_ARRANGEMENT
+{
+  OMX_U32 nSize;
+  OMX_VERSIONTYPE nVersion;
+  OMX_U32 nPortIndex;
+  OMX_U32 id;
+  OMX_U32 cancel_flag;
+  OMX_U32 type;
+  OMX_U32 quincunx_sampling_flag;
+  OMX_U32 content_interpretation_type;
+  OMX_U32 spatial_flipping_flag;
+  OMX_U32 frame0_flipped_flag;
+  OMX_U32 field_views_flag;
+  OMX_U32 current_frame_is_frame0_flag;
+  OMX_U32 frame0_self_contained_flag;
+  OMX_U32 frame1_self_contained_flag;
+  OMX_U32 frame0_grid_position_x;
+  OMX_U32 frame0_grid_position_y;
+  OMX_U32 frame1_grid_position_x;
+  OMX_U32 frame1_grid_position_y;
+  OMX_U32 reserved_byte;
+  OMX_U32 repetition_period;
+  OMX_U32 extension_flag;
+} OMX_QCOM_FRAME_PACK_ARRANGEMENT;
+
 typedef struct OMX_QCOM_EXTRADATA_FRAMEINFO
 {
    // common frame meta data. interlace related info removed
    OMX_VIDEO_PICTURETYPE  ePicType;
    OMX_QCOM_INTERLACETYPE interlaceType;
    OMX_QCOM_PANSCAN       panScan;
+   OMX_QCOM_ASPECT_RATIO  aspectRatio;
    OMX_U32                nConcealedMacroblocks;
+   OMX_U32                nFrameRate;
 } OMX_QCOM_EXTRADATA_FRAMEINFO;
 
 typedef struct OMX_QCOM_EXTRADATA_FRAMEDIMENSION
@@ -566,7 +625,8 @@ typedef enum OMX_QCOM_EXTRADATATYPE
    OMX_ExtraDataFrameDimension = 0x7F000004,
    OMX_ExtraDataVideoEncoderSliceInfo = 0x7F000005,
    OMX_ExtraDataConcealMB = 0x7F000006,
-   OMX_ExtraDataInterlaceFormat = 0x7F000007
+   OMX_ExtraDataInterlaceFormat = 0x7F000007,
+   OMX_ExtraDataPortDef = 0x7F000008
 } OMX_QCOM_EXTRADATATYPE;
 
 typedef struct  OMX_STREAMINTERLACEFORMATTYPE {
@@ -742,7 +802,23 @@ typedef struct QOMX_VIDEO_DECODER_PICTURE_ORDER {
     QOMX_VIDEO_PICTURE_ORDER eOutputPictureOrder;
 } QOMX_VIDEO_DECODER_PICTURE_ORDER;
 
+typedef struct QOMX_INDEXEXTRADATATYPE {
+    OMX_U32 nSize;
+    OMX_VERSIONTYPE nVersion;
+    OMX_U32 nPortIndex;
+    OMX_BOOL bEnabled;
+    OMX_INDEXTYPE nIndex;
+} QOMX_INDEXEXTRADATATYPE;
+
+typedef struct QOMX_INDEXTIMESTAMPREORDER {
+	OMX_U32 nSize;
+	OMX_VERSIONTYPE nVersion;
+	OMX_U32 nPortIndex;
+	OMX_BOOL bEnable;
+};
+
 #define OMX_QCOM_INDEX_PARAM_VIDEO_SYNCFRAMEDECODINGMODE "OMX.QCOM.index.param.video.SyncFrameDecodingMode"
+#define OMX_QCOM_INDEX_PARAM_INDEXEXTRADATA "OMX.QCOM.index.param.IndexExtraData"
 
 #ifdef __cplusplus
 }
