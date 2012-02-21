@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2010, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -51,7 +51,9 @@ public:
   unsigned venc_pause(void);
   unsigned venc_start(void);
   unsigned venc_flush(unsigned);
-
+#ifdef _ANDROID_ICS_
+  bool venc_set_meta_mode(bool);
+#endif
   unsigned venc_resume(void);
   bool venc_use_buf(void*, unsigned);
   bool venc_free_buf(void*, unsigned);
@@ -74,6 +76,11 @@ public:
 	  int size;
 	  int alignment;
 	  int offset;
+#ifdef USE_ION
+          int ion_device_fd;
+          struct ion_allocation_data alloc_data;
+          struct ion_fd_data ion_alloc_fd;
+#endif
 	  };
 
   recon_buffer recon_buff[MAX_RECON_BUFFERS];

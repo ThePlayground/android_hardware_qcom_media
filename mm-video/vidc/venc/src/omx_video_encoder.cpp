@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2010, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -29,6 +29,9 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <string.h>
 #include "video_encoder_device.h"
 #include <stdio.h>
+#ifdef _ANDROID_ICS_
+#include <media/stagefright/HardwareAPI.h>
+#endif
 
 /*----------------------------------------------------------------------------
 * Preprocessor Definitions and Constants
@@ -52,7 +55,11 @@ void *get_omx_component_factory_fn(void)
 
 omx_venc::omx_venc()
 {
-  //nothing to do
+#ifdef _ANDROID_ICS_
+  meta_mode_enable = false;
+  memset(meta_buffer_hdr,0,sizeof(meta_buffer_hdr));
+  memset(meta_buffers,0,sizeof(meta_buffers));
+#endif
 }
 
 omx_venc::~omx_venc()
@@ -90,25 +97,25 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
 
   DEBUG_PRINT_HIGH("\n omx_venc(): Inside component_init()");
   // Copy the role information which provides the decoder m_nkind
-  strncpy((char *)m_nkind,role,OMX_MAX_STRINGNAME_SIZE);
+  strlcpy((char *)m_nkind,role,OMX_MAX_STRINGNAME_SIZE);
 
   if(!strncmp((char *)m_nkind,"OMX.qcom.video.encoder.mpeg4",\
               OMX_MAX_STRINGNAME_SIZE))
   {
-    strncpy((char *)m_cRole, "video_encoder.mpeg4",\
+    strlcpy((char *)m_cRole, "video_encoder.mpeg4",\
             OMX_MAX_STRINGNAME_SIZE);
     codec_type = OMX_VIDEO_CodingMPEG4;
   }
   else if(!strncmp((char *)m_nkind, "OMX.qcom.video.encoder.h263",\
                    OMX_MAX_STRINGNAME_SIZE))
   {
-    strncpy((char *)m_cRole, "video_encoder.h263",OMX_MAX_STRINGNAME_SIZE);
+    strlcpy((char *)m_cRole, "video_encoder.h263",OMX_MAX_STRINGNAME_SIZE);
     codec_type = OMX_VIDEO_CodingH263;
   }
   else if(!strncmp((char *)m_nkind, "OMX.qcom.video.encoder.avc",\
                    OMX_MAX_STRINGNAME_SIZE))
   {
-    strncpy((char *)m_cRole, "video_encoder.avc",OMX_MAX_STRINGNAME_SIZE);
+    strlcpy((char *)m_cRole, "video_encoder.avc",OMX_MAX_STRINGNAME_SIZE);
     codec_type = OMX_VIDEO_CodingAVC;
   }
   else
@@ -229,6 +236,8 @@ OMX_ERRORTYPE omx_venc::component_init(OMX_STRING role)
   m_sInPortDef.format.video.cMIMEType = "YUV420";
   m_sInPortDef.format.video.nFrameWidth = OMX_CORE_QCIF_WIDTH;
   m_sInPortDef.format.video.nFrameHeight = OMX_CORE_QCIF_HEIGHT;
+  m_sInPortDef.format.video.nStride = OMX_CORE_QCIF_WIDTH;
+  m_sInPortDef.format.video.nSliceHeight = OMX_CORE_QCIF_HEIGHT;
   m_sInPortDef.format.video.nBitrate = 64000;
   m_sInPortDef.format.video.xFramerate = 15 << 16;
   m_sInPortDef.format.video.eColorFormat =  OMX_COLOR_FormatYUV420SemiPlanar;
@@ -576,27 +585,34 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
   case OMX_IndexParamVideoMpeg4:
     {
       OMX_VIDEO_PARAM_MPEG4TYPE* pParam = (OMX_VIDEO_PARAM_MPEG4TYPE*)paramData;
+      OMX_VIDEO_PARAM_MPEG4TYPE mp4_param;
+      memcpy(&mp4_param, pParam, sizeof(struct OMX_VIDEO_PARAM_MPEG4TYPE));
       DEBUG_PRINT_LOW("set_parameter: OMX_IndexParamVideoMpeg4");
-      if(m_sParamMPEG4.eProfile == OMX_VIDEO_MPEG4ProfileAdvancedSimple)
+      if(pParam->eProfile == OMX_VIDEO_MPEG4ProfileAdvancedSimple)
       {
 #ifdef MAX_RES_1080P
-        if(pParam->nBFrames > 1)
+        if(pParam->nBFrames)
         {
-          DEBUG_PRINT_ERROR("BFrame set to %d (only 1 Bframe is supported)", pParam->nBFrames);
-          return OMX_ErrorUnsupportedSetting;
+          DEBUG_PRINT_HIGH("INFO: Only 1 Bframe is supported");
+          mp4_param.nBFrames = 1;
         }
 #else
-        if(pParam->nBFrames > 0)
+        if(pParam->nBFrames)
         {
-          DEBUG_PRINT_ERROR("B frames not supported\n");
-          return OMX_ErrorUnsupportedSetting;
+          DEBUG_PRINT_ERROR("Warning: B frames not supported\n");
+          mp4_param.nBFrames = 0;
         }
 #endif
       }
       else
-        pParam->nBFrames = 0;
-
-      if(handle->venc_set_param(paramData,OMX_IndexParamVideoMpeg4) != true)
+      {
+        if(pParam->nBFrames)
+        {
+          DEBUG_PRINT_ERROR("Warning: B frames not supported\n");
+          mp4_param.nBFrames = 0;
+        }
+      }
+      if(handle->venc_set_param(&mp4_param,OMX_IndexParamVideoMpeg4) != true)
       {
         return OMX_ErrorUnsupportedSetting;
       }
@@ -617,34 +633,51 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
   case OMX_IndexParamVideoAvc:
     {
       OMX_VIDEO_PARAM_AVCTYPE* pParam = (OMX_VIDEO_PARAM_AVCTYPE*)paramData;
+      OMX_VIDEO_PARAM_AVCTYPE avc_param;
+      memcpy(&avc_param, pParam, sizeof( struct OMX_VIDEO_PARAM_AVCTYPE));
       DEBUG_PRINT_LOW("set_parameter: OMX_IndexParamVideoAvc");
 
-      if((m_sParamAVC.eProfile == OMX_VIDEO_AVCProfileHigh)||
-         (m_sParamAVC.eProfile == OMX_VIDEO_AVCProfileMain))
+      if((pParam->eProfile == OMX_VIDEO_AVCProfileHigh)||
+         (pParam->eProfile == OMX_VIDEO_AVCProfileMain))
       {
 #ifdef MAX_RES_1080P
-        if(pParam->nBFrames > 1)
+        if(pParam->nBFrames)
         {
-          DEBUG_PRINT_ERROR("BFrame set to %d (only 1 Bframe is supported)", pParam->nBFrames);
-          return OMX_ErrorUnsupportedSetting;
+          DEBUG_PRINT_HIGH("INFO: Only 1 Bframe is supported");
+          avc_param.nBFrames = 1;
         }
-        pParam->nRefFrames = 2;
+        if(pParam->nRefFrames != 2)
+        {
+          DEBUG_PRINT_ERROR("Warning: 2 RefFrames are needed, changing RefFrames from %d to 2", pParam->nRefFrames);
+          avc_param.nRefFrames = 2;
+        }
 #else
-       if(pParam->nBFrames > 0)
+       if(pParam->nBFrames)
        {
-         DEBUG_PRINT_ERROR("B frames not supported\n");
-         return OMX_ErrorUnsupportedSetting;
+         DEBUG_PRINT_ERROR("Warning: B frames not supported\n");
+         avc_param.nBFrames = 0;
        }
-       pParam->nRefFrames = 1;
+       if(pParam->nRefFrames != 1)
+       {
+         DEBUG_PRINT_ERROR("Warning: Only 1 RefFrame is supported, changing RefFrame from %d to 1)", pParam->nRefFrames);
+         avc_param.nRefFrames = 1;
+       }
 #endif
       }
       else
       {
-        pParam->nRefFrames = 1;
-        pParam->nBFrames = 0;
+       if(pParam->nRefFrames != 1)
+       {
+         DEBUG_PRINT_ERROR("Warning: Only 1 RefFrame is supported, changing RefFrame from %d to 1)", pParam->nRefFrames);
+         avc_param.nRefFrames = 1;
+       }
+       if(pParam->nBFrames)
+       {
+         DEBUG_PRINT_ERROR("Warning: B frames not supported\n");
+         avc_param.nBFrames = 0;
+       }
       }
-
-      if(handle->venc_set_param(paramData,OMX_IndexParamVideoAvc) != true)
+      if(handle->venc_set_param(&avc_param,OMX_IndexParamVideoAvc) != true)
       {
         return OMX_ErrorUnsupportedSetting;
       }
@@ -712,7 +745,7 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
       {
         if(!strncmp((char*)comp_role->cRole,"video_encoder.avc",OMX_MAX_STRINGNAME_SIZE))
         {
-          strncpy((char*)m_cRole,"video_encoder.avc",OMX_MAX_STRINGNAME_SIZE);
+          strlcpy((char*)m_cRole,"video_encoder.avc",OMX_MAX_STRINGNAME_SIZE);
         }
         else
         {
@@ -724,7 +757,7 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
       {
         if(!strncmp((const char*)comp_role->cRole,"video_encoder.mpeg4",OMX_MAX_STRINGNAME_SIZE))
         {
-          strncpy((char*)m_cRole,"video_encoder.mpeg4",OMX_MAX_STRINGNAME_SIZE);
+          strlcpy((char*)m_cRole,"video_encoder.mpeg4",OMX_MAX_STRINGNAME_SIZE);
         }
         else
         {
@@ -736,7 +769,7 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
       {
         if(!strncmp((const char*)comp_role->cRole,"video_encoder.h263",OMX_MAX_STRINGNAME_SIZE))
         {
-          strncpy((char*)m_cRole,"video_encoder.h263",OMX_MAX_STRINGNAME_SIZE);
+          strlcpy((char*)m_cRole,"video_encoder.h263",OMX_MAX_STRINGNAME_SIZE);
         }
         else
         {
@@ -873,6 +906,42 @@ OMX_ERRORTYPE  omx_venc::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
       memcpy(&m_sIntraRefresh, pParam, sizeof(m_sIntraRefresh));
       break;
     }
+#ifdef _ANDROID_ICS_
+  case OMX_QcomIndexParamVideoEncodeMetaBufferMode:
+    {
+      StoreMetaDataInBuffersParams *pParam =
+        (StoreMetaDataInBuffersParams*)paramData;
+      if(pParam->nPortIndex == PORT_INDEX_IN)
+      {
+        if(pParam->bStoreMetaData != meta_mode_enable)
+        {
+          if(!handle->venc_set_meta_mode(pParam->bStoreMetaData))
+          {
+            DEBUG_PRINT_ERROR("\nERROR: set Metabuffer mode %d fail",
+                         pParam->bStoreMetaData);
+            return OMX_ErrorUnsupportedSetting;
+          }
+          meta_mode_enable = pParam->bStoreMetaData;
+          if(meta_mode_enable) {
+            m_sInPortDef.nBufferCountActual = 32;
+            m_sInPortDef.nBufferCountMin = 32;
+            if(handle->venc_set_param(&m_sInPortDef,OMX_IndexParamPortDefinition) != true)
+            {
+              DEBUG_PRINT_ERROR("\nERROR: venc_set_param input failed");
+              return OMX_ErrorUnsupportedSetting;
+            }
+          } else {
+            /*TODO: reset encoder driver Meta mode*/
+            dev_get_buf_req   (&m_sOutPortDef.nBufferCountMin,
+                               &m_sOutPortDef.nBufferCountActual,
+                               &m_sOutPortDef.nBufferSize,
+                               m_sOutPortDef.nPortIndex);
+          }
+        }
+      }
+      break;
+    }
+#endif
   case OMX_IndexParamVideoSliceFMO:
   default:
     {
@@ -1132,6 +1201,20 @@ OMX_ERRORTYPE  omx_venc::set_config(OMX_IN OMX_HANDLETYPE      hComp,
       }
       break;
     }
+  case OMX_QcomIndexConfigVideoFramePackingArrangement:
+    {
+      if(m_sOutPortFormat.eCompressionFormat == OMX_VIDEO_CodingAVC)
+      {
+        OMX_QCOM_FRAME_PACK_ARRANGEMENT *configFmt =
+          (OMX_QCOM_FRAME_PACK_ARRANGEMENT *) configData;
+        extra_data_handle.set_frame_pack_data(configFmt);
+      }
+      else
+      {
+        DEBUG_PRINT_ERROR("ERROR: FramePackingData not supported for non AVC compression");
+      }
+      break;
+    }
   default:
     DEBUG_PRINT_ERROR("ERROR: unsupported index %d", (int) configIndex);
     break;
@@ -1175,7 +1258,11 @@ OMX_ERRORTYPE  omx_venc::component_deinit(OMX_IN OMX_HANDLETYPE hComp)
   }
 
   /*Check if the input buffers have to be cleaned up*/
-  if(m_inp_mem_ptr)
+  if(m_inp_mem_ptr
+#ifdef _ANDROID_ICS_
+     && !meta_mode_enable
+#endif
+     )
   {
     DEBUG_PRINT_LOW("Freeing the Input Memory\n");
     for(i=0; i<m_sInPortDef.nBufferCountActual; i++ )
@@ -1348,7 +1435,9 @@ int omx_venc::async_message_process (void *context, void* message)
       omxhdr = NULL;
       m_sVenc_msg->statuscode = VEN_S_EFAIL;
     }
-
+#ifdef _ANDROID_ICS_
+    omx->omx_release_meta_buffer(omxhdr);
+#endif
     omx->post_event ((unsigned int)omxhdr,m_sVenc_msg->statuscode,
                      OMX_COMPONENT_GENERATE_EBD);
     break;

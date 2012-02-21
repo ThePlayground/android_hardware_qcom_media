@@ -25,29 +25,63 @@ WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
 OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
 ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 --------------------------------------------------------------------------*/
-/*============================================================================
-                    V E N C _ U T I L. H
 
-DESCRIPTION
+#include "DivXDrmDecrypt.h"
+#include <dlfcn.h>  // for dlopen/dlclose
 
+#define LOG_NDEBUG 0
+#define LOG_TAG "DivXDrmDecrypt"
+#include <utils/Log.h>
 
-REFERENCES
+static const char* MM_PARSER_LIB = "libmmparser.so";
 
+void* MmParserLib() {
+    static void* mmParserLib = NULL;
 
-============================================================================*/
+    if( mmParserLib != NULL ) {
+        return mmParserLib;
+    }
 
-#ifndef _VENC_UTIL_H
-#define _VENC_UTIL_H
+    mmParserLib = ::dlopen(MM_PARSER_LIB, RTLD_NOW);
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+    if (mmParserLib == NULL) {
+        LOGE("Failed to open MM_PARSER_LIB \n");
+    }
 
-long long GetTimeStamp();
-
-
-#ifdef __cplusplus
+    return mmParserLib;
 }
-#endif
 
-#endif
+DivXDrmDecryptFactory DrmDecryptFactoryFunction() {
+    static DivXDrmDecryptFactory drmDecryptFactoryFunction = NULL;
+
+    if( drmDecryptFactoryFunction != NULL ) {
+        return drmDecryptFactoryFunction;
+    }
+
+    void *mmParserLib = MmParserLib();
+    if (mmParserLib == NULL) {
+        return NULL;
+    }
+
+    drmDecryptFactoryFunction = (DivXDrmDecryptFactory) dlsym(mmParserLib, MEDIA_CREATE_DIVX_DRM_DECRYPT);
+
+    if( drmDecryptFactoryFunction == NULL ) {
+        LOGE(" dlsym for DrmDecrypt factory function failed  \n");
+    }
+
+    return drmDecryptFactoryFunction;
+}
+
+DivXDrmDecrypt* DivXDrmDecrypt::Create( OMX_PTR drmHandle ) {
+    DivXDrmDecryptFactory drmCreateFunc = DrmDecryptFactoryFunction();
+    if( drmCreateFunc == NULL ) {
+        return NULL;
+    }
+
+    DivXDrmDecrypt* decrypt = drmCreateFunc( drmHandle );
+    if( decrypt == NULL ) {
+        LOGE(" failed to instantiate DrmDecoder \n");
+    }
+    return decrypt;
+}
+

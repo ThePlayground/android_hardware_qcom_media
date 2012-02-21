@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2010, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -44,27 +44,24 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "OMX_QCOMExtns.h"
 #include <sys/time.h>
 
-#ifdef _CHROME_
 #include <linux/android_pmem.h>
-#endif
 
 #ifdef _ANDROID_
 #include <binder/MemoryHeapBase.h>
-#include <linux/android_pmem.h>
 
 extern "C"{
 #include<utils/Log.h>
 }
 #define LOG_TAG "OMX-VDEC-TEST"
 #define DEBUG_PRINT
-#define DEBUG_PRINT_ERROR
+#define DEBUG_PRINT_ERROR LOGE
 
 //#define __DEBUG_DIVX__ // Define this macro to print (through logcat)
                          // the kind of frames packed per buffer and
                          // timestamps adjustments for divx.
 
 //#define TEST_TS_FROM_SEI // Define this macro to calculate the timestamps
-                           // from the SEI and VUI data for H264 
+                           // from the SEI and VUI data for H264
 
 #else
 #define DEBUG_PRINT printf
@@ -90,6 +87,8 @@ extern "C" {
 #define true 1
 #define VOP_START_CODE 0x000001B6
 #define SHORT_HEADER_START_CODE 0x00008000
+#define MPEG2_FRAME_START_CODE 0x00000100
+#define MPEG2_SEQ_START_CODE 0x000001B3
 #define VC1_START_CODE  0x00000100
 #define VC1_FRAME_START_CODE  0x0000010D
 #define VC1_FRAME_FIELD_CODE  0x0000010C
@@ -109,12 +108,16 @@ static int previous_vc1_au = 0;
 #define MDP_DEINTERLACE 0x80000000
 
 #define ALLOCATE_BUFFER 0
+
 #ifdef MAX_RES_720P
 #define PMEM_DEVICE "/dev/pmem_adsp"
-#endif
-#ifdef MAX_RES_1080P
+#elif MAX_RES_1080P_EBI
+#define PMEM_DEVICE "/dev/pmem_adsp"
+#elif MAX_RES_1080P
 #define PMEM_DEVICE "/dev/pmem_smipool"
 #endif
+
+//#define USE_EXTERN_PMEM_BUF
 
 /************************************************************************/
 /*              GLOBAL DECLARATIONS                     */
@@ -129,7 +132,8 @@ typedef enum {
   CODEC_FORMAT_H263,
   CODEC_FORMAT_VC1,
   CODEC_FORMAT_DIVX,
-  CODEC_FORMAT_MAX = CODEC_FORMAT_DIVX
+  CODEC_FORMAT_MPEG2,
+  CODEC_FORMAT_MAX = CODEC_FORMAT_MPEG2
 } codec_format;
 
 typedef enum {
@@ -149,7 +153,10 @@ typedef enum {
 
   FILE_TYPE_START_OF_DIVX_SPECIFIC = 40,
   FILE_TYPE_DIVX_4_5_6 = FILE_TYPE_START_OF_DIVX_SPECIFIC,
-  FILE_TYPE_DIVX_311
+  FILE_TYPE_DIVX_311,
+
+  FILE_TYPE_START_OF_MPEG2_SPECIFIC = 50,
+  FILE_TYPE_MPEG2_START_CODE = FILE_TYPE_START_OF_MPEG2_SPECIFIC
 
 } file_type;
 
@@ -173,7 +180,8 @@ struct temp_egl {
 
 static int (*Read_Buffer)(OMX_BUFFERHEADERTYPE  *pBufHdr );
 
-FILE * inputBufferFile;
+int inputBufferFileFd;
+
 FILE * outputBufferFile;
 FILE * seqFile;
 int takeYuvLog = 0;
@@ -274,9 +282,16 @@ OMX_COMPONENTTYPE* dec_handle = 0;
 OMX_BUFFERHEADERTYPE  **pInputBufHdrs = NULL;
 OMX_BUFFERHEADERTYPE  **pOutYUVBufHdrs= NULL;
 
+static OMX_BOOL use_external_pmem_buf = OMX_FALSE;
+
 int rcv_v1=0;
 static struct temp_egl **p_eglHeaders = NULL;
-static unsigned egl_virt_addr[32];
+static unsigned use_buf_virt_addr[32];
+
+OMX_QCOM_PLATFORM_PRIVATE_LIST      *pPlatformList = NULL;
+OMX_QCOM_PLATFORM_PRIVATE_ENTRY     *pPlatformEntry = NULL;
+OMX_QCOM_PLATFORM_PRIVATE_PMEM_INFO *pPMEMInfo = NULL;
+
 /* Performance related variable*/
 //QPERF_INIT(render_fb);
 //QPERF_INIT(client_decode);
@@ -296,6 +311,7 @@ static int open_video_file ();
 static int Read_Buffer_From_DAT_File(OMX_BUFFERHEADERTYPE  *pBufHdr );
 static int Read_Buffer_ArbitraryBytes(OMX_BUFFERHEADERTYPE  *pBufHdr);
 static int Read_Buffer_From_Vop_Start_Code_File(OMX_BUFFERHEADERTYPE  *pBufHdr);
+static int Read_Buffer_From_Mpeg2_Start_Code(OMX_BUFFERHEADERTYPE  *pBufHdr);
 static int Read_Buffer_From_Size_Nal(OMX_BUFFERHEADERTYPE  *pBufHdr);
 static int Read_Buffer_From_RCV_File_Seq_Layer(OMX_BUFFERHEADERTYPE  *pBufHdr);
 static int Read_Buffer_From_RCV_File(OMX_BUFFERHEADERTYPE  *pBufHdr);
@@ -320,6 +336,12 @@ static OMX_ERRORTYPE use_output_buffer(OMX_COMPONENTTYPE      *dec_handle,
                                 OMX_U32              bufSize,
                                 long                 bufcnt);
 
+static OMX_ERRORTYPE use_output_buffer_multiple_fd(OMX_COMPONENTTYPE      *dec_handle,
+                                                   OMX_BUFFERHEADERTYPE ***bufferHdr,
+                                                   OMX_U32              nPortIndex,
+                                                   OMX_U32              bufSize,
+                                                   long                 bufcnt);
+
 static OMX_ERRORTYPE EventHandler(OMX_IN OMX_HANDLETYPE hComponent,
                                   OMX_IN OMX_PTR pAppData,
                                   OMX_IN OMX_EVENTTYPE eEvent,
@@ -335,6 +357,7 @@ static OMX_ERRORTYPE FillBufferDone(OMX_OUT OMX_HANDLETYPE hComponent,
 static void do_freeHandle_and_clean_up(bool isDueToError);
 static bool align_pmem_buffers(int pmem_fd, OMX_U32 buffer_size,
                                   OMX_U32 alignment);
+void getFreePmem();
 static  int clip2(int x)
     {
         x = x -1;
@@ -490,6 +513,45 @@ int process_current_command(const char *seq_command)
     return 0;
 }
 
+void PrintFramePackArrangement(OMX_QCOM_FRAME_PACK_ARRANGEMENT framePackingArrangement)
+{
+   printf("id (%d)\n",
+          framePackingArrangement.id);
+   printf("cancel_flag (%d)\n",
+          framePackingArrangement.cancel_flag);
+   printf("type (%d)\n",
+          framePackingArrangement.type);
+   printf("quincunx_sampling_flag (%d)\n",
+          framePackingArrangement.quincunx_sampling_flag);
+   printf("content_interpretation_type (%d)\n",
+          framePackingArrangement.content_interpretation_type);
+   printf("spatial_flipping_flag (%d)\n",
+          framePackingArrangement.spatial_flipping_flag);
+   printf("frame0_flipped_flag (%d)\n",
+          framePackingArrangement.frame0_flipped_flag);
+   printf("field_views_flag (%d)\n",
+          framePackingArrangement.field_views_flag);
+   printf("current_frame_is_frame0_flag (%d)\n",
+          framePackingArrangement.current_frame_is_frame0_flag);
+   printf("frame0_self_contained_flag (%d)\n",
+          framePackingArrangement.frame0_self_contained_flag);
+   printf("frame1_self_contained_flag (%d)\n",
+          framePackingArrangement.frame1_self_contained_flag);
+   printf("frame0_grid_position_x (%d)\n",
+          framePackingArrangement.frame0_grid_position_x);
+   printf("frame0_grid_position_y (%d)\n",
+          framePackingArrangement.frame0_grid_position_y);
+   printf("frame1_grid_position_x (%d)\n",
+          framePackingArrangement.frame1_grid_position_x);
+   printf("frame1_grid_position_y (%d)\n",
+          framePackingArrangement.frame1_grid_position_y);
+   printf("reserved_byte (%d)\n",
+          framePackingArrangement.reserved_byte);
+   printf("repetition_period (%d)\n",
+          framePackingArrangement.repetition_period);
+   printf("extension_flag (%d)\n",
+          framePackingArrangement.extension_flag);
+}
 void* ebd_thread(void* pArg)
 {
   while(currentStatus != ERROR_STATE)
@@ -545,6 +607,8 @@ void* fbd_thread(void* pArg)
   OMX_S64 base_timestamp = 0, lastTimestamp = 0;
   OMX_BUFFERHEADERTYPE *pBuffer = NULL, *pPrevBuff = NULL;
   pthread_mutex_lock(&eos_lock);
+
+  DEBUG_PRINT("First Inside %s\n", __FUNCTION__);
   while(currentStatus != ERROR_STATE && !bOutputEosReached)
   {
     pthread_mutex_unlock(&eos_lock);
@@ -588,13 +652,8 @@ void* fbd_thread(void* pArg)
             gettimeofday(&t_start, NULL);
         }
       fbd_cnt++;
-#ifdef TEST_TS_FROM_SEI
-      LOGE("%s: fbd_cnt(%d) Buf(%p) Timestamp(%lld)",
-        __FUNCTION__, fbd_cnt, pBuffer, pBuffer->nTimeStamp);
-#else
       DEBUG_PRINT("%s: fbd_cnt(%d) Buf(%p) Timestamp(%lld)",
         __FUNCTION__, fbd_cnt, pBuffer, pBuffer->nTimeStamp);
-#endif
       canDisplay = 1;
       if (realtime_display)
       {
@@ -693,6 +752,18 @@ void* fbd_thread(void* pArg)
               DEBUG_PRINT("OMX_ExtraDataFrameInfo: Buf(%p) TSmp(%lld) PicType(%u) IntT(%u) ConMB(%u)",
                 pBuffer->pBuffer, pBuffer->nTimeStamp, frame_info->ePicType,
                 frame_info->interlaceType, frame_info->nConcealedMacroblocks);
+              DEBUG_PRINT(" FrmRate(%u), AspRatioX(%u), AspRatioY(%u) ",
+                frame_info->nFrameRate, frame_info->aspectRatio.aspectRatioX,
+                frame_info->aspectRatio.aspectRatioY);
+              DEBUG_PRINT("PANSCAN numWindows(%d)", frame_info->panScan.numWindows);
+              for (int i = 0; i < frame_info->panScan.numWindows; i++)
+              {
+                DEBUG_PRINT("WINDOW Lft(%d) Tp(%d) Rgt(%d) Bttm(%d)",
+                  frame_info->panScan.window[i].x,
+                  frame_info->panScan.window[i].y,
+                  frame_info->panScan.window[i].dx,
+                  frame_info->panScan.window[i].dy);
+              }
               break;
             }
             break;
@@ -729,12 +800,39 @@ void* fbd_thread(void* pArg)
         }
       }
     }
-
+    if(pBuffer->nFlags & QOMX_VIDEO_BUFFERFLAG_EOSEQ)
+    {
+        DEBUG_PRINT("\n");
+        DEBUG_PRINT("***************************************************\n");
+        DEBUG_PRINT("FillBufferDone: End Of Sequence Received\n");
+        DEBUG_PRINT("***************************************************\n");
+    }
+    if(pBuffer->nFlags & OMX_BUFFERFLAG_DATACORRUPT)
+    {
+      DEBUG_PRINT("\n");
+      DEBUG_PRINT("***************************************************\n");
+      DEBUG_PRINT("FillBufferDone: OMX_BUFFERFLAG_DATACORRUPT Received\n");
+      DEBUG_PRINT("***************************************************\n");
+    }
     /********************************************************************/
     /* De-Initializing the open max and relasing the buffers and */
     /* closing the files.*/
     /********************************************************************/
-    if (pBuffer->nFlags & OMX_BUFFERFLAG_EOS ) {
+    if (pBuffer->nFlags & OMX_BUFFERFLAG_EOS )
+    {
+      OMX_QCOM_FRAME_PACK_ARRANGEMENT framePackingArrangement;
+      OMX_GetConfig(dec_handle,
+                   (OMX_INDEXTYPE)OMX_QcomIndexConfigVideoFramePackingArrangement,
+                    &framePackingArrangement);
+      PrintFramePackArrangement(framePackingArrangement);
+
+      gettimeofday(&t_end, NULL);
+      total_time = ((float) ((t_end.tv_sec - t_start.tv_sec) * 1e6
+                     + t_end.tv_usec - t_start.tv_usec))/ 1e6;
+      //total frames is fbd_cnt - 1 since the start time is
+      //recorded after the first frame is decoded.
+      printf("\nAvg decoding frame rate=%f\n", (fbd_cnt - 1)/total_time);
+
       DEBUG_PRINT("***************************************************\n");
       DEBUG_PRINT("FillBufferDone: End Of Stream Reached\n");
       DEBUG_PRINT("***************************************************\n");
@@ -749,6 +847,10 @@ void* fbd_thread(void* pArg)
         pBuffer->nFilledLen = 0;
         pBuffer->nFlags &= ~OMX_BUFFERFLAG_EXTRADATA;
         pthread_mutex_lock(&fbd_lock);
+        if ( pPrevBuff != NULL ) {
+            push(fbd_queue, (void *)pPrevBuff);
+            pPrevBuff = NULL;
+        }
         if(push(fbd_queue, (void *)pBuffer) < 0)
         {
           DEBUG_PRINT_ERROR("Error in enqueueing fbd_data\n");
@@ -767,8 +869,9 @@ void* fbd_thread(void* pArg)
           pthread_mutex_lock(&eos_lock);
           if (!bOutputEosReached)
           {
-            OMX_FillThisBuffer(dec_handle, pPrevBuff);
-            free_op_buf_cnt--;
+              if ( OMX_FillThisBuffer(dec_handle, pPrevBuff) == OMX_ErrorNone ) {
+                  free_op_buf_cnt--;
+              }
           }
           pthread_mutex_unlock(&eos_lock);
           pthread_mutex_unlock(&fbd_lock);
@@ -988,7 +1091,7 @@ int main(int argc, char **argv)
       return -1;
     }
 
-    strncpy(in_filename, argv[1], strlen(argv[1])+1);
+    strlcpy(in_filename, argv[1], strlen(argv[1])+1);
     if(argc > 2)
     {
       codec_format_option = (codec_format)atoi(argv[2]);
@@ -999,7 +1102,7 @@ int main(int argc, char **argv)
       {
         if (strlen(argv[next_arg]) > 2)
         {
-          strncpy(seq_file_name, argv[next_arg],strlen(argv[next_arg]) + 1);
+          strlcpy(seq_file_name, argv[next_arg],strlen(argv[next_arg]) + 1);
           next_arg = argc;
         }
         else
@@ -1041,6 +1144,7 @@ int main(int argc, char **argv)
       printf(" 3--> H263\n");
       printf(" 4--> VC1\n");
       printf(" 5--> DivX\n");
+      printf(" 6--> MPEG2\n");
       fflush(stdin);
       scanf("%d", &codec_format_option);
       fflush(stdin);
@@ -1053,7 +1157,7 @@ int main(int argc, char **argv)
       printf(" ENTER THE TEST CASE YOU WOULD LIKE TO EXECUTE\n");
       printf(" *********************************************\n");
       printf(" 1--> PER ACCESS UNIT CLIP (.dat). Clip only available for H264 and Mpeg4\n");
-      printf(" 2--> ARBITRARY BYTES (need .264/.264c/.m4v/.263/.rcv/.vc1)\n");
+      printf(" 2--> ARBITRARY BYTES (need .264/.264c/.m4v/.263/.rcv/.vc1/.m2v)\n");
       if (codec_format_option == CODEC_FORMAT_H264)
       {
         printf(" 3--> NAL LENGTH SIZE CLIP (.264c)\n");
@@ -1074,6 +1178,11 @@ int main(int argc, char **argv)
           printf(" 4--> DivX 3.11 clip \n");
 #endif
       }
+      else if (codec_format_option == CODEC_FORMAT_MPEG2)
+      {
+        printf(" 3--> MPEG2 START CODE CLIP (.m2v)\n");
+      }
+
       fflush(stdin);
       scanf("%d", &file_type_option);
       fflush(stdin);
@@ -1188,6 +1297,9 @@ int main(int argc, char **argv)
           break;
         case CODEC_FORMAT_VC1:
           file_type_option = (file_type)(FILE_TYPE_START_OF_VC1_SPECIFIC + file_type_option - FILE_TYPE_COMMON_CODEC_MAX);
+          break;
+        case CODEC_FORMAT_MPEG2:
+          file_type_option = (file_type)(FILE_TYPE_START_OF_MPEG2_SPECIFIC + file_type_option - FILE_TYPE_COMMON_CODEC_MAX);
           break;
         default:
           printf("Error: Unknown code %d\n", codec_format_option);
@@ -1356,6 +1468,9 @@ int run_tests()
           (codec_format_option == CODEC_FORMAT_MP4)) {
     Read_Buffer = Read_Buffer_From_Vop_Start_Code_File;
   }
+  else if (codec_format_option == CODEC_FORMAT_MPEG2) {
+    Read_Buffer = Read_Buffer_From_Mpeg2_Start_Code;
+  }
   else if(file_type_option == FILE_TYPE_DIVX_4_5_6) {
     Read_Buffer = Read_Buffer_From_DivX_4_5_6_File;
   }
@@ -1379,6 +1494,7 @@ int run_tests()
     case FILE_TYPE_ARBITRARY_BYTES:
     case FILE_TYPE_264_NAL_SIZE_LENGTH:
     case FILE_TYPE_PICTURE_START_CODE:
+    case FILE_TYPE_MPEG2_START_CODE:
     case FILE_TYPE_RCV:
     case FILE_TYPE_VC1:
     case FILE_TYPE_DIVX_4_5_6:
@@ -1408,6 +1524,7 @@ int run_tests()
         {
             DEBUG_PRINT_ERROR("Error - Seq file %s could NOT be opened\n",
                               seq_file_name);
+            return -1;
         }
         else
         {
@@ -1484,9 +1601,17 @@ int Init_Decoder()
     {
         /* Allocate memory for pointers to component name */
         OMX_U8** vidCompNames = (OMX_U8**)malloc((sizeof(OMX_U8*))*total);
+        if (vidCompNames == NULL) {
+            DEBUG_PRINT_ERROR("\nFailed to allocate vidCompNames\n");
+            return -1;
+        }
 
         for (i = 0; i < total; ++i) {
             vidCompNames[i] = (OMX_U8*)malloc(sizeof(OMX_U8)*OMX_MAX_STRINGNAME_SIZE);
+            if (vidCompNames[i] == NULL) {
+                DEBUG_PRINT_ERROR("\nFailed to allocate vidCompNames[%d]\n", i);
+                return -1;
+            }
         }
         OMX_GetComponentsOfRole(role, &total, vidCompNames);
         DEBUG_PRINT("\nComponents of Role:%s\n", role);
@@ -1502,32 +1627,37 @@ int Init_Decoder()
 
     if (codec_format_option == CODEC_FORMAT_H264)
     {
-      strncpy(vdecCompNames, "OMX.qcom.video.decoder.avc", 27);
+      strlcpy(vdecCompNames, "OMX.qcom.video.decoder.avc", 27);
+      //strlcpy(vdecCompNames, "OMX.SEC.qcom.video.decoder.avc", 31);
     }
     else if (codec_format_option == CODEC_FORMAT_MP4)
     {
-      strncpy(vdecCompNames, "OMX.qcom.video.decoder.mpeg4", 29);
+      strlcpy(vdecCompNames, "OMX.qcom.video.decoder.mpeg4", 29);
     }
     else if (codec_format_option == CODEC_FORMAT_H263)
     {
-      strncpy(vdecCompNames, "OMX.qcom.video.decoder.h263", 28);
+      strlcpy(vdecCompNames, "OMX.qcom.video.decoder.h263", 28);
     }
     else if (codec_format_option == CODEC_FORMAT_VC1)
     {
-      strncpy(vdecCompNames, "OMX.qcom.video.decoder.vc1", 27);
+      strlcpy(vdecCompNames, "OMX.qcom.video.decoder.vc1", 27);
+    }
+    else if (codec_format_option == CODEC_FORMAT_MPEG2)
+    {
+      strlcpy(vdecCompNames, "OMX.qcom.video.decoder.mpeg2", 29);
     }
     else if (file_type_option == FILE_TYPE_RCV)
     {
-      strncpy(vdecCompNames, "OMX.qcom.video.decoder.wmv", 27);
+      strlcpy(vdecCompNames, "OMX.qcom.video.decoder.wmv", 27);
     }
     else if (file_type_option == FILE_TYPE_DIVX_4_5_6)
     {
-      strncpy(vdecCompNames, "OMX.qcom.video.decoder.divx", 28);
+      strlcpy(vdecCompNames, "OMX.qcom.video.decoder.divx", 28);
     }
 #ifdef MAX_RES_1080P
     else if (file_type_option == FILE_TYPE_DIVX_311)
     {
-      strncpy(vdecCompNames, "OMX.qcom.video.decoder.divx311", 31);
+      strlcpy(vdecCompNames, "OMX.qcom.video.decoder.divx311", 31);
     }
 #endif
     else
@@ -1591,6 +1721,10 @@ int Init_Decoder()
       portFmt.format.video.eCompressionFormat =
           (OMX_VIDEO_CODINGTYPE)QOMX_VIDEO_CodingDivx;
     }
+    else if (codec_format_option == CODEC_FORMAT_MPEG2)
+    {
+      portFmt.format.video.eCompressionFormat = OMX_VIDEO_CodingMPEG2;
+    }
     else
     {
       DEBUG_PRINT_ERROR("Error: Unsupported codec %d\n", codec_format_option);
@@ -1623,6 +1757,7 @@ int Play_Decoder()
     {
       case FILE_TYPE_DAT_PER_AU:
       case FILE_TYPE_PICTURE_START_CODE:
+      case FILE_TYPE_MPEG2_START_CODE:
       case FILE_TYPE_RCV:
       case FILE_TYPE_VC1:
 #ifdef MAX_RES_1080P
@@ -1646,6 +1781,25 @@ int Play_Decoder()
     }
     OMX_SetParameter(dec_handle,(OMX_INDEXTYPE)OMX_QcomIndexPortDefn,
                      (OMX_PTR)&inputPortFmt);
+#ifdef USE_EXTERN_PMEM_BUF
+    OMX_QCOM_PARAM_PORTDEFINITIONTYPE outPortFmt;
+    memset(&outPortFmt, 0, sizeof(OMX_QCOM_PARAM_PORTDEFINITIONTYPE));
+    CONFIG_VERSION_SIZE(outPortFmt);
+    outPortFmt.nPortIndex = 1;  // output port
+    outPortFmt.nCacheAttr = OMX_QCOM_CacheAttrNone;
+    outPortFmt.nMemRegion = OMX_QCOM_MemRegionSMI;
+    OMX_SetParameter(dec_handle,(OMX_INDEXTYPE)OMX_QcomIndexPortDefn,
+                     (OMX_PTR)&outPortFmt);
+
+    OMX_QCOM_PLATFORMPRIVATE_EXTN outPltPvtExtn;
+    memset(&outPltPvtExtn, 0, sizeof(OMX_QCOM_PLATFORMPRIVATE_EXTN));
+    CONFIG_VERSION_SIZE(outPltPvtExtn);
+    outPltPvtExtn.nPortIndex = 1;  // output port
+    outPltPvtExtn.type = OMX_QCOM_PLATFORM_PRIVATE_PMEM;
+    OMX_SetParameter(dec_handle,(OMX_INDEXTYPE)OMX_QcomIndexPlatformPvt,
+                     (OMX_PTR)&outPltPvtExtn);
+    use_external_pmem_buf = OMX_TRUE;
+#endif
     QOMX_ENABLETYPE extra_data;
     extra_data.bEnable = OMX_TRUE;
 #if 0
@@ -1656,7 +1810,7 @@ int Play_Decoder()
     OMX_SetParameter(dec_handle,(OMX_INDEXTYPE)OMX_QcomIndexParamConcealMBMapExtraData,
                      (OMX_PTR)&extra_data);
 #endif
-#if 0
+#if 1
     OMX_SetParameter(dec_handle,(OMX_INDEXTYPE)OMX_QcomIndexParamFrameInfoExtraData,
                      (OMX_PTR)&extra_data);
 #endif
@@ -1688,20 +1842,19 @@ int Play_Decoder()
         (file_type_option == FILE_TYPE_DIVX_311) ) {
 
             int off;
-            off =  fread(&width, 1, 4, inputBufferFile);
-            DEBUG_PRINT("\nWidth for DIVX = %d\n", width);
-            if (off == 0)
-            {
-                DEBUG_PRINT("\nFailed to read width for divx\n");
+
+            if ( read(inputBufferFileFd, &width, 4 ) == -1 ) {
+                DEBUG_PRINT_ERROR("\nFailed to read width for divx\n");
                 return  -1;
             }
 
-            off =  fread(&height, 1, 4, inputBufferFile);
-            if (off == 0)
-            {
-                DEBUG_PRINT("\nFailed to read height for divx\n");
-                return -1;
+            DEBUG_PRINT("\nWidth for DIVX = %d\n", width);
+
+            if ( read(inputBufferFileFd, &height, 4 ) == -1 ) {
+                DEBUG_PRINT_ERROR("\nFailed to read height for divx\n");
+                return  -1;
             }
+
             DEBUG_PRINT("\nHeight for DIVX = %u\n", height);
             sliceheight = height;
             stride = width;
@@ -1761,17 +1914,15 @@ int Play_Decoder()
         DEBUG_PRINT_ERROR("\n Error in retrieving supported color formats");
         return -1;
     }
-#ifdef MAX_RES_720P
     picture_order.nPortIndex = 1;
     DEBUG_PRINT("\nSet picture order\n");
     if(OMX_SetParameter(dec_handle,
 	   (OMX_INDEXTYPE)OMX_QcomIndexParamVideoDecoderPictureOrder,
        (OMX_PTR)&picture_order) != OMX_ErrorNone)
     {
-        DEBUG_PRINT_ERROR("\n ERROR: Setting picture order!");
+        printf("\n ERROR: Setting picture order!");
         return -1;
     }
-#endif
     DEBUG_PRINT("\nVideo format: W x H (%d x %d)",
       portFmt.format.video.nFrameWidth,
       portFmt.format.video.nFrameHeight);
@@ -1829,9 +1980,21 @@ int Play_Decoder()
     }
 
 #ifndef USE_EGL_IMAGE_TEST_APP
-    /* Allocate buffer on decoder's o/p port */
-    error = Allocate_Buffer(dec_handle, &pOutYUVBufHdrs, portFmt.nPortIndex,
-                            portFmt.nBufferCountActual, portFmt.nBufferSize);
+    if (use_external_pmem_buf)
+    {
+        DEBUG_PRINT_ERROR("\n Use External pmem buf: OMX_UseBuffer %p", &pInputBufHdrs);
+        error =  use_output_buffer_multiple_fd(dec_handle,
+                                               &pOutYUVBufHdrs,
+                                               portFmt.nPortIndex,
+                                               portFmt.nBufferSize,
+                                               portFmt.nBufferCountActual);
+    }
+    else
+    {
+        /* Allocate buffer on decoder's o/p port */
+        error = Allocate_Buffer(dec_handle, &pOutYUVBufHdrs, portFmt.nPortIndex,
+                                portFmt.nBufferCountActual, portFmt.nBufferSize);
+    }
     free_op_buf_cnt = portFmt.nBufferCountActual;
     if (error != OMX_ErrorNone) {
         DEBUG_PRINT_ERROR("Error - OMX_AllocateBuffer Output buffer error\n");
@@ -1890,9 +2053,18 @@ int Play_Decoder()
       do_freeHandle_and_clean_up(true);
       return -1;
     }
-
+    if (pOutYUVBufHdrs == NULL)
+    {
+        DEBUG_PRINT_ERROR("Error - pOutYUVBufHdrs is NULL\n");
+        return -1;
+    }
     for(bufCnt=0; bufCnt < portFmt.nBufferCountActual; ++bufCnt) {
         DEBUG_PRINT("OMX_FillThisBuffer on output buf no.%d\n",bufCnt);
+        if (pOutYUVBufHdrs[bufCnt] == NULL)
+        {
+            DEBUG_PRINT_ERROR("Error - pOutYUVBufHdrs[%d] is NULL\n", bufCnt);
+            return -1;
+        }
         pOutYUVBufHdrs[bufCnt]->nOutputPortIndex = 1;
         pOutYUVBufHdrs[bufCnt]->nFlags &= ~OMX_BUFFERFLAG_EOS;
         ret = OMX_FillThisBuffer(dec_handle, pOutYUVBufHdrs[bufCnt]);
@@ -2156,13 +2328,87 @@ static OMX_ERRORTYPE use_output_buffer ( OMX_COMPONENTTYPE *dec_handle,
         DEBUG_PRINT_ERROR("\n mmap failed for buffers");
         return OMX_ErrorInsufficientResources;
       }
-        egl_virt_addr[bufCnt] = (unsigned)pvirt;
+        use_buf_virt_addr[bufCnt] = (unsigned)pvirt;
         error = OMX_UseEGLImage(dec_handle, &((*pBufHdrs)[bufCnt]),
                               nPortIndex, pvirt,(void *)p_eglHeaders[bufCnt]);
        }
     return error;
 }
 
+static OMX_ERRORTYPE use_output_buffer_multiple_fd ( OMX_COMPONENTTYPE *dec_handle,
+                                  OMX_BUFFERHEADERTYPE  ***pBufHdrs,
+                                  OMX_U32 nPortIndex,
+                                  OMX_U32 bufSize,
+                                  long bufCntMin)
+{
+    DEBUG_PRINT("Inside %s \n", __FUNCTION__);
+    OMX_ERRORTYPE error=OMX_ErrorNone;
+    long bufCnt=0;
+    OMX_U8* pvirt = NULL;
+
+    *pBufHdrs= (OMX_BUFFERHEADERTYPE **)
+                   malloc(sizeof(OMX_BUFFERHEADERTYPE)* bufCntMin);
+    if(*pBufHdrs == NULL){
+        DEBUG_PRINT_ERROR("\n m_inp_heap_ptr Allocation failed ");
+        return OMX_ErrorInsufficientResources;
+     }
+    pPlatformList = (OMX_QCOM_PLATFORM_PRIVATE_LIST *)
+        malloc(sizeof(OMX_QCOM_PLATFORM_PRIVATE_LIST)* bufCntMin);
+
+    if(pPlatformList == NULL){
+        DEBUG_PRINT_ERROR("\n pPlatformList Allocation failed ");
+        return OMX_ErrorInsufficientResources;
+     }
+
+    pPlatformEntry = (OMX_QCOM_PLATFORM_PRIVATE_ENTRY *)
+        malloc(sizeof(OMX_QCOM_PLATFORM_PRIVATE_ENTRY)* bufCntMin);
+
+    if(pPlatformEntry == NULL){
+        DEBUG_PRINT_ERROR("\n pPlatformEntry Allocation failed ");
+        return OMX_ErrorInsufficientResources;
+     }
+
+    pPMEMInfo = (OMX_QCOM_PLATFORM_PRIVATE_PMEM_INFO *)
+        malloc(sizeof(OMX_QCOM_PLATFORM_PRIVATE_PMEM_INFO)* bufCntMin);
+
+    if(pPMEMInfo == NULL){
+        DEBUG_PRINT_ERROR("\n pPMEMInfo Allocation failed ");
+        return OMX_ErrorInsufficientResources;
+     }
+
+    //output_use_buffer = true;
+    for(bufCnt=0; bufCnt < bufCntMin; ++bufCnt) {
+        // allocate input buffers
+      DEBUG_PRINT("OMX_UseBuffer_multiple_fd No %d %d \n", bufCnt, bufSize);
+
+      pPlatformEntry[bufCnt].type       = OMX_QCOM_PLATFORM_PRIVATE_PMEM;
+      pPlatformEntry[bufCnt].entry      = &pPMEMInfo[bufCnt];
+      // Initialize the Platform List
+      pPlatformList[bufCnt].nEntries    = 1;
+      pPlatformList[bufCnt].entryList   = &pPlatformEntry[bufCnt];
+      pPMEMInfo[bufCnt].offset          =  0;
+      pPMEMInfo[bufCnt].pmem_fd = open(PMEM_DEVICE,O_RDWR);;
+      if(pPMEMInfo[bufCnt].pmem_fd < 0) {
+          DEBUG_PRINT_ERROR("\n open failed %s",PMEM_DEVICE);
+          return OMX_ErrorInsufficientResources;
+      }
+      align_pmem_buffers(pPMEMInfo[bufCnt].pmem_fd, bufSize,
+                                  8192);
+      DEBUG_PRINT("\n allocation size %d pmem fd 0x%x",bufSize,pPMEMInfo[bufCnt].pmem_fd);
+      pvirt = (unsigned char *)mmap(NULL,bufSize,PROT_READ|PROT_WRITE,
+                      MAP_SHARED,pPMEMInfo[bufCnt].pmem_fd,0);
+      getFreePmem();
+      DEBUG_PRINT("\n Virtaul Address %p Size %d pmem_fd=0x%x",pvirt,bufSize,pPMEMInfo[bufCnt].pmem_fd);
+      if (pvirt == MAP_FAILED) {
+        DEBUG_PRINT_ERROR("\n mmap failed for buffers");
+        return OMX_ErrorInsufficientResources;
+      }
+      use_buf_virt_addr[bufCnt] = (unsigned)pvirt;
+      error = OMX_UseBuffer(dec_handle, &((*pBufHdrs)[bufCnt]),
+                            nPortIndex, &pPlatformList[bufCnt], bufSize, pvirt);
+    }
+    return error;
+}
 static void do_freeHandle_and_clean_up(bool isDueToError)
 {
     int bufCnt = 0;
@@ -2205,11 +2451,45 @@ static void do_freeHandle_and_clean_up(bool isDueToError)
                p_eglHeaders[bufCnt] = NULL;
             }
         }
+        if (use_external_pmem_buf)
+        {
+            DEBUG_PRINT("Freeing in external pmem case: buffer=0x%x, pmem_fd=0x%d",
+                              pOutYUVBufHdrs[bufCnt]->pBuffer,
+                              pPMEMInfo[bufCnt].pmem_fd);
+            if (pOutYUVBufHdrs[bufCnt]->pBuffer)
+            {
+                munmap (pOutYUVBufHdrs[bufCnt]->pBuffer,
+                        pOutYUVBufHdrs[bufCnt]->nAllocLen);
+            }
+            if (&pPMEMInfo[bufCnt])
+            {
+                close(pPMEMInfo[bufCnt].pmem_fd);
+                pPMEMInfo[bufCnt].pmem_fd = -1;
+            }
+        }
         OMX_FreeBuffer(dec_handle, 1, pOutYUVBufHdrs[bufCnt]);
       }
       if(p_eglHeaders) {
           free(p_eglHeaders);
           p_eglHeaders = NULL;
+      }
+      if (pPMEMInfo)
+      {
+          DEBUG_PRINT("Freeing in external pmem case:PMEM");
+          free(pPMEMInfo);
+          pPMEMInfo = NULL;
+      }
+      if (pPlatformEntry)
+      {
+          DEBUG_PRINT("Freeing in external pmem case:ENTRY");
+          free(pPlatformEntry);
+          pPlatformEntry = NULL;
+      }
+      if (pPlatformList)
+      {
+          DEBUG_PRINT("Freeing in external pmem case:LIST");
+          free(pPlatformList);
+          pPlatformList = NULL;
       }
       wait_for_event();
     }
@@ -2227,10 +2507,10 @@ static void do_freeHandle_and_clean_up(bool isDueToError)
     OMX_Deinit();
 
     DEBUG_PRINT("[OMX Vdec Test] - closing all files\n");
-    if(inputBufferFile)
+    if(inputBufferFileFd != -1)
     {
-    fclose(inputBufferFile);
-       inputBufferFile = NULL;
+        close(inputBufferFileFd);
+        inputBufferFileFd = -1;
     }
 
     DEBUG_PRINT("[OMX Vdec Test] - after free inputfile\n");
@@ -2270,7 +2550,7 @@ static int Read_Buffer_From_DAT_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
     int i=0;
     unsigned char *read_buffer=NULL;
     char c = '1'; //initialize to anything except '\0'(0)
-    char inputFrameSize[10];
+    char inputFrameSize[12];
     int count =0; char cnt =0;
     memset(temp_buffer, 0, sizeof(temp_buffer));
 
@@ -2280,7 +2560,7 @@ static int Read_Buffer_From_DAT_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
     /* Check the input file format, may result in infinite loop */
     {
         DEBUG_PRINT("loop[%d] count[%d]\n",cnt,count);
-        count  = fread(&inputFrameSize[cnt], 1, 1, inputBufferFile);
+        count = read( inputBufferFileFd, &inputFrameSize[cnt], 1);
         if(inputFrameSize[cnt] == '\0' )
           break;
         cnt++;
@@ -2290,8 +2570,8 @@ static int Read_Buffer_From_DAT_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
     pBufHdr->nFilledLen = 0;
 
     /* get the frame length */
-    fseek(inputBufferFile, -1, SEEK_CUR);
-    bytes_read = fread(pBufHdr->pBuffer, 1, frameSize,  inputBufferFile);
+    lseek64(inputBufferFileFd, -1, SEEK_CUR);
+    bytes_read = read(inputBufferFileFd, pBufHdr->pBuffer, frameSize);
 
     DEBUG_PRINT("Actual frame Size [%d] bytes_read using fread[%d]\n",
                   frameSize, bytes_read);
@@ -2311,7 +2591,7 @@ static int Read_Buffer_ArbitraryBytes(OMX_BUFFERHEADERTYPE  *pBufHdr)
 {
     int bytes_read=0;
     DEBUG_PRINT("Inside %s \n", __FUNCTION__);
-    bytes_read = fread(pBufHdr->pBuffer, 1, NUMBER_OF_ARBITRARYBYTES_READ,  inputBufferFile);
+    bytes_read = read(inputBufferFileFd, pBufHdr->pBuffer, NUMBER_OF_ARBITRARYBYTES_READ);
     if(bytes_read == 0) {
         DEBUG_PRINT("Bytes read Zero After Read frame Size \n");
         DEBUG_PRINT("Checking VideoPlayback Count:video_playback_count is:%d\n",
@@ -2338,13 +2618,13 @@ static int Read_Buffer_From_Vop_Start_Code_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
     pBufHdr->nFilledLen = 0;
     static unsigned int header_code = 0;
 
-    DEBUG_PRINT("Inside %s \n", __FUNCTION__);
+    DEBUG_PRINT("Inside %s", __FUNCTION__);
 
     do
     {
       //Start codes are always byte aligned.
-      bytes_read = fread(&pBufHdr->pBuffer[readOffset],1, 1,inputBufferFile);
-      if(!bytes_read)
+      bytes_read = read(inputBufferFileFd, &pBufHdr->pBuffer[readOffset], 1);
+      if(bytes_read == 0 || bytes_read == -1)
       {
           DEBUG_PRINT("Bytes read Zero \n");
           break;
@@ -2366,18 +2646,17 @@ static int Read_Buffer_From_Vop_Start_Code_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
         }
         if ((header_code == VOP_START_CODE) && (code == VOP_START_CODE))
         {
-          //Seek backwards by 4
-          fseek(inputBufferFile, -4, SEEK_CUR);
-          readOffset-=3;
-          break;
-
+            //Seek backwards by 4
+            lseek64(inputBufferFileFd, -4, SEEK_CUR);
+            readOffset-=3;
+            break;
         }
         else if (( header_code == SHORT_HEADER_START_CODE ) && ( SHORT_HEADER_START_CODE == (code & 0xFFFFFC00)))
         {
-          //Seek backwards by 4
-          fseek(inputBufferFile, -4, SEEK_CUR);
-          readOffset-=3;
-          break;
+            //Seek backwards by 4
+            lseek64(inputBufferFileFd, -4, SEEK_CUR);
+            readOffset-=3;
+            break;
         }
       }
       readOffset++;
@@ -2386,6 +2665,88 @@ static int Read_Buffer_From_Vop_Start_Code_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
     timeStampLfile += timestampInterval;
     return readOffset;
 }
+static int Read_Buffer_From_Mpeg2_Start_Code(OMX_BUFFERHEADERTYPE  *pBufHdr)
+{
+  unsigned int readOffset = 0;
+  int bytesRead = 0;
+  unsigned int code = 0;
+  pBufHdr->nFilledLen = 0;
+  static unsigned int firstParse = true;
+  unsigned int seenFrame = false;
+
+  DEBUG_PRINT("Inside %s", __FUNCTION__);
+
+  /* Read one byte at a time. Construct the code every byte in order to
+   * compare to the start codes. Keep looping until we've read in a complete
+   * frame, which can be either just a picture start code + picture, or can
+   * include the sequence header as well
+   */
+  while (1) {
+    bytesRead = read(inputBufferFileFd, &pBufHdr->pBuffer[readOffset], 1);
+
+    /* Exit the loop if we can't read any more bytes */
+    if (bytesRead == 0 || bytesRead == -1) {
+      break;
+    }
+
+    /* Construct the code one byte at a time */
+    code <<= 8;
+    code |= (0x000000FF & pBufHdr->pBuffer[readOffset]);
+
+    /* Can't compare the code to MPEG2 start codes until we've read the
+     * first four bytes
+     */
+    if (readOffset >= 3) {
+
+      /* If this is the first time we're reading from the file, then we
+       * need to throw away the system start code information at the
+       * beginning. We can just look for the first sequence header.
+       */
+      if (firstParse) {
+        if (code == MPEG2_SEQ_START_CODE) {
+          /* Seek back by 4 bytes and reset code so that we can skip
+           * down to the common case below.
+           */
+          lseek(inputBufferFileFd, -4, SEEK_CUR);
+          code = 0;
+          readOffset -= 3;
+          firstParse = false;
+          continue;
+        }
+      }
+
+      /* If we have already parsed a frame and we see a sequence header, then
+       * the sequence header is part of the next frame so we seek back and
+       * break.
+       */
+      if (code == MPEG2_SEQ_START_CODE) {
+        if (seenFrame) {
+          lseek(inputBufferFileFd, -4, SEEK_CUR);
+          readOffset -= 3;
+          break;
+        }
+        /* If we haven't seen a frame yet, then read in all the data until we
+         * either see another frame start code or sequence header start code.
+         */
+      } else if (code == MPEG2_FRAME_START_CODE) {
+        if (!seenFrame) {
+          seenFrame = true;
+        } else {
+          lseek(inputBufferFileFd, -4, SEEK_CUR);
+          readOffset -= 3;
+          break;
+        }
+      }
+    }
+
+    readOffset++;
+  }
+
+  pBufHdr->nTimeStamp = timeStampLfile;
+  timeStampLfile += timestampInterval;
+  return readOffset;
+}
+
 
 static int Read_Buffer_From_Size_Nal(OMX_BUFFERHEADERTYPE  *pBufHdr)
 {
@@ -2397,8 +2758,8 @@ static int Read_Buffer_From_Size_Nal(OMX_BUFFERHEADERTYPE  *pBufHdr)
     int bytes_read = 0;
 
     // read the "size_nal_field"-byte size field
-    bytes_read = fread(pBufHdr->pBuffer + pBufHdr->nOffset, 1, nalSize, inputBufferFile);
-    if (bytes_read == 0)
+    bytes_read = read(inputBufferFileFd, pBufHdr->pBuffer + pBufHdr->nOffset, nalSize);
+    if (bytes_read == 0 || bytes_read == -1)
     {
       DEBUG_PRINT("Failed to read frame or it might be EOF\n");
       return 0;
@@ -2417,7 +2778,7 @@ static int Read_Buffer_From_Size_Nal(OMX_BUFFERHEADERTYPE  *pBufHdr)
     size = (unsigned int)(*((unsigned int *)(temp_size)));
 
     // now read the data
-    bytes_read = fread(pBufHdr->pBuffer + pBufHdr->nOffset + nalSize, 1, size, inputBufferFile);
+    bytes_read = read(inputBufferFileFd, pBufHdr->pBuffer + pBufHdr->nOffset + nalSize, size);
     if (bytes_read != size)
     {
       DEBUG_PRINT_ERROR("Failed to read frame\n");
@@ -2438,20 +2799,21 @@ static int Read_Buffer_From_RCV_File_Seq_Layer(OMX_BUFFERHEADERTYPE  *pBufHdr)
 
     DEBUG_PRINT("Inside %s \n", __FUNCTION__);
 
-    fread(&startcode, 4, 1, inputBufferFile);
+    read(inputBufferFileFd, &startcode, 4);
 
     /* read size of struct C as it need not be 4 always*/
-    fread(&size_struct_C, 1, 4, inputBufferFile);
+    read(inputBufferFileFd, &size_struct_C, 4);
 
     /* reseek to beginning of sequence header */
-    fseek(inputBufferFile, -8, SEEK_CUR);
+    lseek64(inputBufferFileFd, -8, SEEK_CUR);
 
     if ((startcode & 0xFF000000) == 0xC5000000)
     {
 
       DEBUG_PRINT("Read_Buffer_From_RCV_File_Seq_Layer size_struct_C: %d\n", size_struct_C);
 
-      readOffset = fread(pBufHdr->pBuffer, 1, VC1_SEQ_LAYER_SIZE_WITHOUT_STRUCTC + size_struct_C, inputBufferFile);
+      readOffset = read(inputBufferFileFd, pBufHdr->pBuffer, VC1_SEQ_LAYER_SIZE_WITHOUT_STRUCTC + size_struct_C);
+
     }
     else if((startcode & 0xFF000000) == 0x85000000)
     {
@@ -2461,7 +2823,8 @@ static int Read_Buffer_From_RCV_File_Seq_Layer(OMX_BUFFERHEADERTYPE  *pBufHdr)
 
       DEBUG_PRINT("Read_Buffer_From_RCV_File_Seq_Layer size_struct_C: %d\n", size_struct_C);
 
-      readOffset = fread(pBufHdr->pBuffer, 1, VC1_SEQ_LAYER_SIZE_V1_WITHOUT_STRUCTC + size_struct_C, inputBufferFile);
+      readOffset = read(inputBufferFileFd, pBufHdr->pBuffer, VC1_SEQ_LAYER_SIZE_V1_WITHOUT_STRUCTC + size_struct_C);
+
     }
     else
     {
@@ -2497,17 +2860,17 @@ static int Read_Buffer_From_RCV_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
     {
       /* for the case of RCV V1 format, the frame header is only of 4 bytes and has
          only the frame size information */
-      readOffset = fread(&len, 1, 4, inputBufferFile);
-      DEBUG_PRINT("Read_Buffer_From_RCV_File - framesize %d %x\n", len, len);
+        readOffset = read(inputBufferFileFd, &len, 4);
+        DEBUG_PRINT("Read_Buffer_From_RCV_File - framesize %d %x\n", len, len);
 
     }
     else
     {
       /* for a regular RCV file, 3 bytes comprise the frame size and 1 byte for key*/
-      readOffset = fread(&len, 1, 3, inputBufferFile);
-      DEBUG_PRINT("Read_Buffer_From_RCV_File - framesize %d %x\n", len, len);
+        readOffset = read(inputBufferFileFd, &len, 3);
+        DEBUG_PRINT("Read_Buffer_From_RCV_File - framesize %d %x\n", len, len);
 
-      readOffset = fread(&key, 1, 1, inputBufferFile);
+        readOffset = read(inputBufferFileFd, &key, 1);
       if ( (key & 0x80) == false)
       {
         DEBUG_PRINT("Read_Buffer_From_RCV_File - Non IDR frame key %x\n", key);
@@ -2518,9 +2881,9 @@ static int Read_Buffer_From_RCV_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
     if(!rcv_v1)
     {
       /* There is timestamp field only for regular RCV format and not for RCV V1 format*/
-      readOffset = fread(&pBufHdr->nTimeStamp, 1, 4, inputBufferFile);
-      DEBUG_PRINT("Read_Buffer_From_RCV_File - timeStamp %d\n", pBufHdr->nTimeStamp);
-      pBufHdr->nTimeStamp *= 1000;
+        readOffset = read(inputBufferFileFd, &pBufHdr->nTimeStamp, 4);
+        DEBUG_PRINT("Read_Buffer_From_RCV_File - timeStamp %d\n", pBufHdr->nTimeStamp);
+        pBufHdr->nTimeStamp *= 1000;
     }
     else
     {
@@ -2531,12 +2894,16 @@ static int Read_Buffer_From_RCV_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
     if(len > pBufHdr->nAllocLen)
     {
        DEBUG_PRINT_ERROR("Error in sufficient buffer framesize %d, allocalen %d noffset %d\n",len,pBufHdr->nAllocLen, pBufHdr->nOffset);
-       readOffset = fread(pBufHdr->pBuffer+pBufHdr->nOffset, 1, pBufHdr->nAllocLen - pBufHdr->nOffset , inputBufferFile);
-       fseek(inputBufferFile, len - readOffset,SEEK_CUR);
+       readOffset = read(inputBufferFileFd, pBufHdr->pBuffer+pBufHdr->nOffset,
+                         pBufHdr->nAllocLen - pBufHdr->nOffset);
+
+       loff_t off = (len - readOffset)*1LL;
+       lseek64(inputBufferFileFd, off ,SEEK_CUR);
        return readOffset;
     }
-    else
-    readOffset = fread(pBufHdr->pBuffer+pBufHdr->nOffset, 1, len, inputBufferFile);
+    else {
+        readOffset = read(inputBufferFileFd, pBufHdr->pBuffer+pBufHdr->nOffset, len);
+    }
     if (readOffset != len)
     {
       DEBUG_PRINT("EOS reach or Reading error %d, %s \n", readOffset, strerror( errno ));
@@ -2566,20 +2933,25 @@ static int Read_Buffer_From_VC1_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
     static int timeStampLfile = 0;
     OMX_U8 *pBuffer = pBufHdr->pBuffer + pBufHdr->nOffset;
     DEBUG_PRINT("Inside %s \n", __FUNCTION__);
-
     unsigned int readOffset = 0;
     int bytes_read = 0;
-    unsigned int code = 0;
-
+    unsigned int code = 0, total_bytes = 0;
     do
     {
+      if (total_bytes == pBufHdr->nAllocLen)
+      {
+        DEBUG_PRINT_ERROR("Buffer overflow!");
+        break;
+      }
       //Start codes are always byte aligned.
-      bytes_read = fread(&pBuffer[readOffset],1, 1,inputBufferFile);
+      bytes_read = read(inputBufferFileFd, &pBuffer[readOffset],1 );
+
       if(!bytes_read)
       {
           DEBUG_PRINT("\n Bytes read Zero \n");
           break;
       }
+      total_bytes++;
       code <<= 8;
       code |= (0x000000FF & pBufHdr->pBuffer[readOffset]);
       //VOP start code comparision
@@ -2594,7 +2966,7 @@ static int Read_Buffer_From_VC1_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
               previous_vc1_au = 1;
           }
           //Seek backwards by 4
-          fseek(inputBufferFile, -4, SEEK_CUR);
+          lseek64(inputBufferFileFd, -4, SEEK_CUR);
           readOffset-=3;
 
           while(pBufHdr->pBuffer[readOffset-1] == 0)
@@ -2642,14 +3014,16 @@ static int Read_Buffer_From_DivX_4_5_6_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
 #ifdef __DEBUG_DIVX__
     char pckt_type[20];
     int pckd_frms = 0;
-    static unsigned int total_bytes = 0;
-    static unsigned int total_frames = 0;
+    static unsigned long long int total_bytes = 0;
+    static unsigned long long int total_frames = 0;
 #endif //__DEBUG_DIVX__
 
     DEBUG_PRINT("Inside %s \n", __FUNCTION__);
+
     do {
       p_buffer = (char *)pBufHdr->pBuffer + byte_pos;
-      bytes_read = fread(p_buffer, 1, NUMBER_OF_ARBITRARYBYTES_READ, inputBufferFile);
+
+      bytes_read = read(inputBufferFileFd, p_buffer, NUMBER_OF_ARBITRARYBYTES_READ);
       byte_pos += bytes_read;
       for (byte_cntr = 0; byte_cntr < bytes_read && !pckt_ready; byte_cntr++) {
         read_code <<= 8;
@@ -2705,7 +3079,7 @@ static int Read_Buffer_From_DivX_4_5_6_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
             // The vop start code was found in the last 4 bytes,
             // seek backwards by 4 to include this start code
             // with the next buffer.
-            fseek(inputBufferFile, -4, SEEK_CUR);
+            lseek64(inputBufferFileFd, -4, SEEK_CUR);
             byte_pos -= 4;
 #ifdef __DEBUG_DIVX__
             pckd_frms--;
@@ -2714,17 +3088,36 @@ static int Read_Buffer_From_DivX_4_5_6_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
         }
       }
       if (pckt_ready) {
-          fseek(inputBufferFile,
-            -(byte_pos - offset_array[pckt_end_idx]), SEEK_CUR);
+          loff_t off = (byte_pos - offset_array[pckt_end_idx]);
+          if ( lseek64(inputBufferFileFd, -1LL*off , SEEK_CUR) == -1 ){
+              DEBUG_PRINT_ERROR("lseek64 with offset = %lld failed with errno %d"
+                                ", current position =0x%llx", -1LL*off,
+                                errno, lseek64(inputBufferFileFd, 0, SEEK_CUR));
+          }
       }
-      else if (feof(inputBufferFile)) { // Handle last packet
-          offset_array[vop_set_cntr] = byte_pos;
-          pckt_end_idx = vop_set_cntr;
-          pckt_ready = true;
+      else {
+          char eofByte;
+          int ret = read(inputBufferFileFd, &eofByte, 1 );
+          if ( ret == 0 ) {
+              offset_array[vop_set_cntr] = byte_pos;
+              pckt_end_idx = vop_set_cntr;
+              pckt_ready = true;
 #ifdef __DEBUG_DIVX__
-          pckt_type[pckd_frms] = '\0';
-          total_frames += pckd_frms;
+              pckt_type[pckd_frms] = '\0';
+              total_frames += pckd_frms;
 #endif //__DEBUG_DIVX__
+          }
+          else if (ret == 1){
+              if ( lseek64(inputBufferFileFd, -1, SEEK_CUR ) == -1 ){
+                  DEBUG_PRINT_ERROR("lseek64 failed with errno = %d, "
+                                    "current fileposition = %llx",
+                                    errno,
+                                    lseek64(inputBufferFileFd, 0, SEEK_CUR));
+              }
+          }
+          else {
+              DEBUG_PRINT_ERROR("Error when checking for EOF");
+          }
       }
     } while (!pckt_ready);
     pBufHdr->nFilledLen = offset_array[pckt_end_idx];
@@ -2732,7 +3125,7 @@ static int Read_Buffer_From_DivX_4_5_6_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
     timeStampLfile += timestampInterval;
 #ifdef __DEBUG_DIVX__
     total_bytes += pBufHdr->nFilledLen;
-    LOGE("[DivX] Packet: Type[%s] Size[%u] TS[%lld] TB[%u] NFrms[%u]\n",
+    LOGE("[DivX] Packet: Type[%s] Size[%u] TS[%lld] TB[%llx] NFrms[%lld]\n",
       pckt_type, pBufHdr->nFilledLen, pBufHdr->nTimeStamp,
 	  total_bytes, total_frames);
 #endif //__DEBUG_DIVX__
@@ -2774,9 +3167,11 @@ static int Read_Buffer_From_DivX_311_File(OMX_BUFFERHEADERTYPE  *pBufHdr)
     //Read first frame based on size
     //DivX 311 frame - 4 byte header with size followed by the frame
 
-    bytes_read = fread(&frame_size, 1, num_bytes_size, inputBufferFile);
+    bytes_read = read(inputBufferFileFd, &frame_size, num_bytes_size);
+
     DEBUG_PRINT("Read_Buffer_From_DivX_311_File: Frame size = %d\n", frame_size);
-    n_offset += fread(p_buffer, 1, frame_size, inputBufferFile);
+    n_offset += read(inputBufferFileFd, p_buffer, frame_size);
+
     pBufHdr->nTimeStamp = timeStampLfile;
 
     timeStampLfile += timestampInterval;
@@ -2795,18 +3190,17 @@ static int open_video_file ()
     char outputfilename[512];
     DEBUG_PRINT("Inside %s filename=%s\n", __FUNCTION__, in_filename);
 
-    inputBufferFile = fopen (in_filename, "rb");
-    if (inputBufferFile == NULL) {
-        DEBUG_PRINT_ERROR("Error - i/p file %s could NOT be opened\n",
-                          in_filename);
+    if ( (inputBufferFileFd = open( in_filename, O_RDONLY | O_LARGEFILE) ) == -1 ){
+        DEBUG_PRINT_ERROR("Error - i/p file %s could NOT be opened errno = %d\n",
+                          in_filename, errno);
         error_code = -1;
     }
     else {
-        DEBUG_PRINT("I/p file %s is opened \n", in_filename);
+        DEBUG_PRINT_ERROR("i/p file %s is opened \n", in_filename);
     }
 
     if (takeYuvLog) {
-        strncpy(outputfilename, "yuvframes.yuv", 14);
+        strlcpy(outputfilename, "yuvframes.yuv", 14);
         outputBufferFile = fopen (outputfilename, "ab");
         if (outputBufferFile == NULL)
         {
@@ -2906,8 +3300,10 @@ void overlay_set()
 
     if(height >= vinfo.yres)
     {
+        overlayp->dst_rect.h = (overlayp->dst_rect.w * height)/width;
         overlayp->dst_rect.y = 0;
-        overlayp->dst_rect.h = vinfo.yres;
+        if (overlayp->dst_rect.h < vinfo.yres)
+            overlayp->dst_rect.y = (vinfo.yres - overlayp->dst_rect.h)/2;
     }
     else
     {
@@ -2943,22 +3339,36 @@ int overlay_fb(struct OMX_BUFFERHEADERTYPE *pBufHdr)
     OMX_QCOM_PLATFORM_PRIVATE_PMEM_INFO *pPMEMInfo = NULL;
     struct msmfb_overlay_data ov_front;
     memset(&ov_front, 0, sizeof(struct msmfb_overlay_data));
-#ifdef _ANDROID_ && !USE_EGL_IMAGE_TEST_APP
+#if defined(_ANDROID_) && !defined(USE_EGL_IMAGE_TEST_APP) && !defined(USE_EXTERN_PMEM_BUF)
     MemoryHeapBase *vheap = NULL;
 #endif
+
+    DEBUG_PRINT("overlay_fb:");
     ov_front.id = overlayp->id;
+    if (pBufHdr->pPlatformPrivate == NULL)
+    {
+        LOGE("overlay_fb: pPlatformPrivate is null");
+        return -1;
+    }
     pPMEMInfo  = (OMX_QCOM_PLATFORM_PRIVATE_PMEM_INFO *)
                 ((OMX_QCOM_PLATFORM_PRIVATE_LIST *)
                     pBufHdr->pPlatformPrivate)->entryList->entry;
-#ifdef _ANDROID_ && !USE_EGL_IMAGE_TEST_APP
+    if (pPMEMInfo == NULL)
+    {
+
+        LOGE("overlay_fb: pmem_info is null");
+        return -1;
+    }
+#if defined(_ANDROID_) && !defined(USE_EGL_IMAGE_TEST_APP) && !defined(USE_EXTERN_PMEM_BUF)
     vheap = (MemoryHeapBase*)pPMEMInfo->pmem_fd;
 #endif
 
-#ifdef _ANDROID_ && !USE_EGL_IMAGE_TEST_APP
+#if defined(_ANDROID_) && !defined(USE_EGL_IMAGE_TEST_APP) && !defined(USE_EXTERN_PMEM_BUF)
     ov_front.data.memory_id = vheap->getHeapID();
 #else
     ov_front.data.memory_id = pPMEMInfo->pmem_fd;
 #endif
+
     ov_front.data.offset = pPMEMInfo->offset;
 
     DEBUG_PRINT("\n ov_front.data.memory_id = %d", ov_front.data.memory_id);
@@ -2988,7 +3398,7 @@ void render_fb(struct OMX_BUFFERHEADERTYPE *pBufHdr)
     OMX_QCOM_EXTRADATA_FRAMEINFO *pExtraFrameInfo = 0;
     OMX_QCOM_PLATFORM_PRIVATE_PMEM_INFO *pPMEMInfo = NULL;
     unsigned int destx, desty,destW, destH;
-#ifdef _ANDROID_ && !USE_EGL_IMAGE_TEST_APP
+#if defined(_ANDROID_) && !defined(USE_EGL_IMAGE_TEST_APP) && !defined(USE_EXTERN_PMEM_BUF)
     MemoryHeapBase *vheap = NULL;
 #endif
 
@@ -3032,7 +3442,7 @@ void render_fb(struct OMX_BUFFERHEADERTYPE *pBufHdr)
    pPMEMInfo  = (OMX_QCOM_PLATFORM_PRIVATE_PMEM_INFO *)
                 ((OMX_QCOM_PLATFORM_PRIVATE_LIST *)
                     pBufHdr->pPlatformPrivate)->entryList->entry;
-#ifdef _ANDROID_ && !USE_EGL_IMAGE_TEST_APP
+#if defined(_ANDROID_) && !defined(USE_EGL_IMAGE_TEST_APP) && !defined(USE_EXTERN_PMEM_BUF)
     vheap = (MemoryHeapBase *)pPMEMInfo->pmem_fd;
 #endif
 
@@ -3046,7 +3456,7 @@ void render_fb(struct OMX_BUFFERHEADERTYPE *pBufHdr)
     e->src.height = portFmt.format.video.nSliceHeight;
     e->src.format = MDP_Y_CBCR_H2V2;
         e->src.offset = pPMEMInfo->offset;
-#ifdef _ANDROID_ && !USE_EGL_IMAGE_TEST_APP
+#if defined(_ANDROID_) && !defined(USE_EGL_IMAGE_TEST_APP) && !defined(USE_EXTERN_PMEM_BUF)
     e->src.memory_id = vheap->getHeapID();
 #else
     e->src.memory_id = pPMEMInfo->pmem_fd;
@@ -3153,6 +3563,24 @@ int disable_output_port()
         free(p_eglHeaders);
         p_eglHeaders = NULL;
     }
+    if (pPMEMInfo)
+    {
+        DEBUG_PRINT("Freeing in external pmem case:PMEM");
+        free(pPMEMInfo);
+        pPMEMInfo = NULL;
+    }
+    if (pPlatformEntry)
+    {
+        DEBUG_PRINT("Freeing in external pmem case:ENTRY");
+        free(pPlatformEntry);
+        pPlatformEntry = NULL;
+    }
+    if (pPlatformList)
+    {
+        DEBUG_PRINT("Freeing in external pmem case:LIST");
+        free(pPlatformList);
+        pPlatformList = NULL;
+    }
     if (currentStatus == ERROR_STATE)
     {
       do_freeHandle_and_clean_up(true);
@@ -3172,8 +3600,20 @@ int enable_output_port()
 #ifndef USE_EGL_IMAGE_TEST_APP
     /* Allocate buffer on decoder's o/p port */
     portFmt.nPortIndex = 1;
-    error = Allocate_Buffer(dec_handle, &pOutYUVBufHdrs, portFmt.nPortIndex,
-                            portFmt.nBufferCountActual, portFmt.nBufferSize);
+    if (use_external_pmem_buf)
+    {
+        DEBUG_PRINT("Enable op port: calling use_buffer_mult_fd\n");
+        error =  use_output_buffer_multiple_fd(dec_handle,
+                                               &pOutYUVBufHdrs,
+                                               portFmt.nPortIndex,
+                                               portFmt.nBufferSize,
+                                               portFmt.nBufferCountActual);
+    }
+    else
+    {
+        error = Allocate_Buffer(dec_handle, &pOutYUVBufHdrs, portFmt.nPortIndex,
+                                portFmt.nBufferCountActual, portFmt.nBufferSize);
+    }
     if (error != OMX_ErrorNone) {
         DEBUG_PRINT_ERROR("Error - OMX_AllocateBuffer Output buffer error\n");
         return -1;
@@ -3206,8 +3646,18 @@ int enable_output_port()
       do_freeHandle_and_clean_up(true);
       return -1;
     }
+    if (pOutYUVBufHdrs == NULL)
+    {
+        DEBUG_PRINT_ERROR("Error - pOutYUVBufHdrs is NULL\n");
+        return -1;
+    }
     for(bufCnt=0; bufCnt < portFmt.nBufferCountActual; ++bufCnt) {
         DEBUG_PRINT("OMX_FillThisBuffer on output buf no.%d\n",bufCnt);
+        if (pOutYUVBufHdrs[bufCnt] == NULL)
+        {
+            DEBUG_PRINT_ERROR("Error - pOutYUVBufHdrs[%d] is NULL\n", bufCnt);
+            return -1;
+        }
         pOutYUVBufHdrs[bufCnt]->nOutputPortIndex = 1;
         pOutYUVBufHdrs[bufCnt]->nFlags &= ~OMX_BUFFERFLAG_EOS;
         ret = OMX_FillThisBuffer(dec_handle, pOutYUVBufHdrs[bufCnt]);
@@ -3269,7 +3719,6 @@ void free_output_buffers()
     int index = 0;
     OMX_BUFFERHEADERTYPE *pBuffer = (OMX_BUFFERHEADERTYPE *)pop(fbd_queue);
     while (pBuffer) {
-        DEBUG_PRINT("\n In Free Buffer call");
         DEBUG_PRINT("\n pOutYUVBufHdrs %p p_eglHeaders %p output_use_buffer %d",
                pOutYUVBufHdrs,p_eglHeaders,output_use_buffer);
         if(pOutYUVBufHdrs && p_eglHeaders && output_use_buffer)
@@ -3278,13 +3727,31 @@ void free_output_buffers()
            DEBUG_PRINT("\n Index of free buffer %d",index);
            DEBUG_PRINT("\n Address freed %p size freed %d",pBuffer->pBuffer,
                   pBuffer->nAllocLen);
-           munmap((void *)egl_virt_addr[index],pBuffer->nAllocLen);
+           munmap((void *)use_buf_virt_addr[index],pBuffer->nAllocLen);
            if(p_eglHeaders[index])
            {
                close(p_eglHeaders[index]->pmem_fd);
                free(p_eglHeaders[index]);
                p_eglHeaders[index] = NULL;
            }
+        }
+
+        if (pOutYUVBufHdrs && use_external_pmem_buf)
+        {
+            index = pBuffer - pOutYUVBufHdrs[0];
+            DEBUG_PRINT("\n Address freed %p size freed %d,virt=0x%x,pmem_fd=0x%x",
+                              pBuffer->pBuffer,
+                              pBuffer->nAllocLen,
+                              use_buf_virt_addr[index],
+                              pPMEMInfo[index].pmem_fd);
+            munmap((void *)use_buf_virt_addr[index],pBuffer->nAllocLen);
+            getFreePmem();
+            use_buf_virt_addr[index] = -1;
+            if (&pPMEMInfo[index])
+            {
+                close(pPMEMInfo[index].pmem_fd);
+                pPMEMInfo[index].pmem_fd = -1;
+            }
         }
         DEBUG_PRINT("\n Free output buffer");
         OMX_FreeBuffer(dec_handle, 1, pBuffer);
@@ -3298,6 +3765,7 @@ static bool align_pmem_buffers(int pmem_fd, OMX_U32 buffer_size,
   struct pmem_allocation allocation;
   allocation.size = buffer_size;
   allocation.align = clip2(alignment);
+
   if (allocation.align < 4096)
   {
     allocation.align = 4096;
@@ -3345,4 +3813,25 @@ void close_display()
   overlay_unset();
   close(fb_fd);
   fb_fd = -1;
+}
+
+void getFreePmem()
+{
+   int ret = -1;
+   /*Open pmem device and query free pmem*/
+   int pmem_fd = open (PMEM_DEVICE,O_RDWR);
+
+   if(pmem_fd < 0) {
+     LOGE("Unable to open pmem device");
+     return;
+   }
+   struct pmem_freespace fs;
+   ret = ioctl(pmem_fd, PMEM_GET_FREE_SPACE, &fs);
+   if(ret) {
+     LOGE("IOCTL to query pmem free space failed");
+     goto freespace_query_failed;
+   }
+   LOGE("Available free space %lx largest chunk %lx\n", fs.total, fs.largest);
+freespace_query_failed:
+   close(pmem_fd);
 }

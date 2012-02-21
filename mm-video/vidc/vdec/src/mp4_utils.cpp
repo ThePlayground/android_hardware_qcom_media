@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2009, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -243,7 +243,7 @@ bool MP4_Utils::parseHeader(mp4StreamType * psBits) {
 bool MP4_Utils::is_notcodec_vop(unsigned char *pbuffer, unsigned int len)
 {
    unsigned int index = 4,vop_bits=0;
-   unsigned int temp = vop_time_resolution;
+   unsigned int temp = vop_time_resolution - 1;
    unsigned char vop_type=0,modulo_bit=0,not_coded=0;
    if (!vop_time_found || !pbuffer || len < 5) {
       return false;

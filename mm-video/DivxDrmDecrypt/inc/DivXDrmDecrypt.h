@@ -25,77 +25,25 @@ WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
 OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
 ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 --------------------------------------------------------------------------*/
-#ifndef FRAMEPARSER_H
-#define FRAMEPARSER_H
 
-#include "OMX_Core.h"
-#include "OMX_QCOMExtns.h"
-#include "h264_utils.h"
-//#include <stdlib.h>
+#ifndef __DIVXDRMDECRYPT_H__
+#define __DIVXDRMDECRYPT_H__
 
-enum codec_type
+#include <OMX_Core.h>
+
+//Abstract base class of API to decrypt DRM content.
+class DivXDrmDecrypt
 {
-    CODEC_TYPE_MPEG4 = 0,
-    CODEC_TYPE_DIVX = 0,
-    CODEC_TYPE_H263 = 1,
-    CODEC_TYPE_H264 = 2,
-    CODEC_TYPE_VC1 = 3,
-    CODEC_TYPE_MPEG2 = 4,
-    CODEC_TYPE_MAX = CODEC_TYPE_MPEG2
-};
-
-enum state_start_code_parse
-{
-   A0,
-   A1,
-   A2,
-   A3,
-   A4,
-   A5
-};
-
-enum state_nal_parse
-{
-   NAL_LENGTH_ACC,
-   NAL_PARSING
-};
-
-class frame_parse
-{
-
 public:
-	H264_Utils *mutils;
-	int init_start_codes (codec_type codec_type_parse);
-	int parse_sc_frame (OMX_BUFFERHEADERTYPE *source,
-                         OMX_BUFFERHEADERTYPE *dest ,
-						             OMX_U32 *partialframe);
-	int init_nal_length (unsigned int nal_length);
-	int parse_h264_nallength (OMX_BUFFERHEADERTYPE *source,
-		                        OMX_BUFFERHEADERTYPE *dest ,
-							              OMX_U32 *partialframe);
-	void flush ();
-	 frame_parse ();
-	~frame_parse ();
-
-private:
-   /*Variables for Start code based Parsing*/
-   enum state_start_code_parse parse_state;
-   unsigned char *start_code;
-   unsigned char *mask_code;
-   unsigned char last_byte_h263;
-   unsigned char last_byte;
-   bool header_found;
-   bool skip_frame_boundary;
-
-   /*Variables for NAL Length Parsing*/
-   enum state_nal_parse state_nal;
-   unsigned int nal_length;
-   unsigned int accum_length;
-   unsigned int bytes_tobeparsed;
-   /*Functions to support additional start code parsing*/
-   void parse_additional_start_code(OMX_U8 *psource, OMX_U32 *parsed_length);
-   void check_skip_frame_boundary(OMX_U32 *partial_frame);
-   void update_skip_frame();
+    static DivXDrmDecrypt* Create( OMX_PTR drmHandle );
+    virtual OMX_ERRORTYPE Init() = 0;
+    virtual OMX_ERRORTYPE Decrypt(OMX_BUFFERHEADERTYPE* buffer) = 0;
+    inline virtual ~DivXDrmDecrypt() {}
 };
 
-#endif /* FRAMEPARSER_H */
+//.so file should provide a function with the name createDivXDrmDecrypt with
+//prototype of DivXDrmDecryptFactory.
+static const char* MEDIA_CREATE_DIVX_DRM_DECRYPT = "createDivXDrmDecrypt";
+typedef DivXDrmDecrypt* (*DivXDrmDecryptFactory)( OMX_PTR drmHandle );
+
+#endif //__DIVXDRMDECRYPT_H__

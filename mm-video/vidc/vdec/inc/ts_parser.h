@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -25,77 +25,62 @@ WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
 OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
 ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 --------------------------------------------------------------------------*/
-#ifndef FRAMEPARSER_H
-#define FRAMEPARSER_H
+#ifndef __DTSPARSER_H
+#define __DTSPARSER_H
 
 #include "OMX_Core.h"
 #include "OMX_QCOMExtns.h"
-#include "h264_utils.h"
-//#include <stdlib.h>
+#include "qc_omx_component.h"
 
-enum codec_type
-{
-    CODEC_TYPE_MPEG4 = 0,
-    CODEC_TYPE_DIVX = 0,
-    CODEC_TYPE_H263 = 1,
-    CODEC_TYPE_H264 = 2,
-    CODEC_TYPE_VC1 = 3,
-    CODEC_TYPE_MPEG2 = 4,
-    CODEC_TYPE_MAX = CODEC_TYPE_MPEG2
-};
+#include<stdlib.h>
 
-enum state_start_code_parse
-{
-   A0,
-   A1,
-   A2,
-   A3,
-   A4,
-   A5
-};
+#include <stdio.h>
+#include <inttypes.h>
 
-enum state_nal_parse
-{
-   NAL_LENGTH_ACC,
-   NAL_PARSING
-};
+#ifdef _ANDROID_
+extern "C"{
+#include<utils/Log.h>
+}
+#endif
 
-class frame_parse
-{
-
+class omx_time_stamp_reorder {
 public:
-	H264_Utils *mutils;
-	int init_start_codes (codec_type codec_type_parse);
-	int parse_sc_frame (OMX_BUFFERHEADERTYPE *source,
-                         OMX_BUFFERHEADERTYPE *dest ,
-						             OMX_U32 *partialframe);
-	int init_nal_length (unsigned int nal_length);
-	int parse_h264_nallength (OMX_BUFFERHEADERTYPE *source,
-		                        OMX_BUFFERHEADERTYPE *dest ,
-							              OMX_U32 *partialframe);
-	void flush ();
-	 frame_parse ();
-	~frame_parse ();
+	omx_time_stamp_reorder();
+	~omx_time_stamp_reorder();
+	void set_timestamp_reorder_mode(bool flag);
+        void enable_debug_print(bool flag);
+	bool insert_timestamp(OMX_BUFFERHEADERTYPE *header);
+	bool get_next_timestamp(OMX_BUFFERHEADERTYPE *header, bool is_interlaced);
+	bool remove_time_stamp(OMX_TICKS ts, bool is_interlaced);
+	void flush_timestamp();
 
 private:
-   /*Variables for Start code based Parsing*/
-   enum state_start_code_parse parse_state;
-   unsigned char *start_code;
-   unsigned char *mask_code;
-   unsigned char last_byte_h263;
-   unsigned char last_byte;
-   bool header_found;
-   bool skip_frame_boundary;
-
-   /*Variables for NAL Length Parsing*/
-   enum state_nal_parse state_nal;
-   unsigned int nal_length;
-   unsigned int accum_length;
-   unsigned int bytes_tobeparsed;
-   /*Functions to support additional start code parsing*/
-   void parse_additional_start_code(OMX_U8 *psource, OMX_U32 *parsed_length);
-   void check_skip_frame_boundary(OMX_U32 *partial_frame);
-   void update_skip_frame();
+	#define TIME_SZ 64
+	typedef struct timestamp {
+		OMX_TICKS timestamps;
+		bool in_use;
+	}timestamp;
+	typedef struct time_stamp_list {
+		timestamp input_timestamps[TIME_SZ];
+		time_stamp_list *next;
+		time_stamp_list *prev;
+		unsigned int entries_filled;
+	}time_stamp_list;
+	bool error;
+	time_stamp_list *phead,*pcurrent;
+	bool get_current_list();
+	bool add_new_list();
+	bool update_head();
+	void delete_list();
+	void handle_error()
+	{
+		LOGE("Error handler called for TS Parser");
+		if (error)
+			return;
+		error = true;
+		delete_list();
+	}
+	bool reorder_ts;
+        bool print_debug;
 };
-
-#endif /* FRAMEPARSER_H */
+#endif

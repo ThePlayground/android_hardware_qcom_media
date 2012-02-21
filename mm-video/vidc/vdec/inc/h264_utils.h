@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2010, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -53,6 +53,8 @@ This module contains H264 video decoder utilities and helper routines.
 
 #define OMX_CORE_720P_HEIGHT 720
 #define OMX_CORE_720P_WIDTH 1280
+
+#define PANSCAN_HDLR
 
 /* =======================================================================
 
@@ -256,7 +258,8 @@ enum SEI_PAYLOAD_TYPE
   FULL_FRAME_FREEZE_RELEASE,
   FULL_FRAME_SNAPSHOT,
   PROGRESSIVE_REFINEMENT_SEGMENT_START,
-  PROGRESSIVE_REFINEMENT_SEGMENT_END
+  PROGRESSIVE_REFINEMENT_SEGMENT_END,
+  SEI_PAYLOAD_FRAME_PACKING_ARRANGEMENT = 0x2D
 };
 
 typedef struct
@@ -275,6 +278,15 @@ typedef struct
 
 typedef struct
 {
+  OMX_U32  aspect_ratio_idc;
+  OMX_U32  aspect_ratio_x;
+  OMX_U32  aspect_ratio_y;
+} h264_aspect_ratio_info;
+
+typedef struct
+{
+  OMX_U8   aspect_ratio_info_present_flag;
+  h264_aspect_ratio_info aspect_ratio_info;
   OMX_U8   timing_info_present_flag;
   OMX_U32  num_units_in_tick;
   OMX_U32  time_scale;
@@ -323,23 +335,100 @@ typedef struct
   OMX_U32  rect_id;
   OMX_U8   rect_cancel_flag;
   OMX_U32  cnt;
-  OMX_U32  rect_left_offset[MAX_PAN_SCAN_RECT];
-  OMX_U32  rect_right_offset[MAX_PAN_SCAN_RECT];
-  OMX_U32  rect_top_offset[MAX_PAN_SCAN_RECT];
-  OMX_U32  rect_bottom_offset[MAX_PAN_SCAN_RECT];
+  OMX_S32  rect_left_offset[MAX_PAN_SCAN_RECT];
+  OMX_S32  rect_right_offset[MAX_PAN_SCAN_RECT];
+  OMX_S32  rect_top_offset[MAX_PAN_SCAN_RECT];
+  OMX_S32  rect_bottom_offset[MAX_PAN_SCAN_RECT];
   OMX_U32  rect_repetition_period;
 } h264_pan_scan;
+
+#ifdef PANSCAN_HDLR
+template <class NODE_STRUCT>
+class omx_dl_list
+{
+public:
+  omx_dl_list() { head = tail = NULL; } ;
+  ~omx_dl_list() {};
+  void add_multiple(NODE_STRUCT *data_arr, int data_num);
+  NODE_STRUCT *remove_first();
+  NODE_STRUCT *remove_last();
+  void add_last(NODE_STRUCT *data_ptr);
+  NODE_STRUCT *watch_first();
+  NODE_STRUCT *watch_last();
+private:
+  NODE_STRUCT *head, *tail;
+};
+
+class panscan_handler
+{
+public:
+  panscan_handler();
+  ~panscan_handler();
+  bool initialize(int num_data);
+  h264_pan_scan *get_free();
+  h264_pan_scan *get_populated(OMX_S64 frame_ts);
+  void update_last(OMX_S64 frame_ts);
+private:
+  typedef struct PANSCAN_NODE
+  {
+    h264_pan_scan pan_scan_param;
+    OMX_S64  start_ts, end_ts;
+    bool active;
+    PANSCAN_NODE *next, *prev;
+  } PANSCAN_NODE;
+  omx_dl_list<PANSCAN_NODE> panscan_used;
+  omx_dl_list<PANSCAN_NODE> panscan_free;
+  PANSCAN_NODE *panscan_data;
+};
+
+#if 1 // Debug panscan data
+
+#define PRINT_PANSCAN_PARAM(H264_PARAM)
+#define PRINT_PANSCAN_DATA(NODE)
+
+#else
+
+#define PRINT_PANSCAN_PARAM(H264_PARAM) \
+do {\
+  LOGE("%s(): left_off(%ld) right_off(%ld) top_off(%ld) bottom_off(%ld)",\
+    __FUNCTION__,\
+    (H264_PARAM).rect_left_offset[0],\
+    (H264_PARAM).rect_right_offset[0],\
+    (H264_PARAM).rect_top_offset[0],\
+    (H264_PARAM).rect_bottom_offset[0]);\
+}while(0)
+
+#define PRINT_PANSCAN_DATA(NODE) \
+do {\
+  if (NODE) {\
+    LOGE("%s(): PANSCAN DATA start_ts(%lld) end_ts(%lld)", __FUNCTION__,\
+	  (NODE)->start_ts, (NODE)->end_ts);\
+	PRINT_PANSCAN_PARAM(NODE->pan_scan_param);\
+  }\
+}while(0)
+
+#endif // End debug panscan data
+
+#endif
 
 class h264_stream_parser
 {
   public:
-    h264_stream_parser() { reset(); };
-    ~h264_stream_parser() {};
+    h264_stream_parser();
+    ~h264_stream_parser();
     void reset();
-    void fill_pan_scan_data(OMX_QCOM_PANSCAN *dest_pan_scan);
+    void fill_pan_scan_data(OMX_QCOM_PANSCAN *dest_pan_scan, OMX_S64 timestamp);
+    void fill_aspect_ratio_info(OMX_QCOM_ASPECT_RATIO *dest_aspect_ratio);
     void parse_nal(OMX_U8* data_ptr, OMX_U32 data_len,
-                   OMX_U32 nal_type = NALU_TYPE_UNSPECIFIED);
+                   OMX_U32 nal_type = NALU_TYPE_UNSPECIFIED,
+                   bool enable_emu_sc = true);
     OMX_S64 process_ts_with_sei_vui(OMX_S64 timestamp);
+    void get_frame_pack_data(OMX_QCOM_FRAME_PACK_ARRANGEMENT *frame_pack);
+    bool is_mbaff();
+    void get_frame_rate(OMX_U32 *frame_rate);
+#ifdef PANSCAN_HDLR
+    void update_panscan_data(OMX_S64 timestamp);
+#endif
   private:
     void init_bitstream(OMX_U8* data, OMX_U32 size);
     OMX_U32 extract_bits(OMX_U32 n);
@@ -347,8 +436,10 @@ class h264_stream_parser
     void read_word();
     OMX_U32 uev();
     OMX_S32 sev();
+    OMX_S32 iv(OMX_U32 n_bits);
     void parse_sps();
     void parse_vui(bool vui_in_extradata = true);
+    void aspect_ratio_info();
     void hrd_parameters(h264_hrd_param *hrd_param);
     void parse_sei();
     void sei_buffering_period();
@@ -359,6 +450,7 @@ class h264_stream_parser
     OMX_U32 get_nal_unit_type(OMX_U32 *nal_unit_type);
     OMX_S64 calculate_buf_period_ts(OMX_S64 timestamp);
     OMX_S64 calculate_fixed_fps_ts(OMX_S64 timestamp, OMX_U32 DeltaTfiDivisor);
+    void parse_frame_pack();
 
     OMX_U32 curr_32_bit;
     OMX_U32 bits_read;
@@ -366,11 +458,19 @@ class h264_stream_parser
     OMX_U32 emulation_code_skip_cntr;
     OMX_U8* bitstream;
     OMX_U32 bitstream_bytes;
+    OMX_U32 frame_rate;
+    bool    emulation_sc_enabled;
 
     h264_vui_param vui_param;
     h264_sei_buf_period sei_buf_period;
     h264_sei_pic_timing sei_pic_timing;
-    h264_pan_scan pan_scan_param;
+#ifdef PANSCAN_HDLR
+    panscan_handler *panscan_hdl;
+#else
+    h264_pan_scan panscan_param;
+#endif
+    OMX_QCOM_FRAME_PACK_ARRANGEMENT frame_packing_arrangement;
+	bool 	mbaff_flag;
 };
 
 #endif /* H264_UTILS_H */

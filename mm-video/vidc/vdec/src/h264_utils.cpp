@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2010, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -505,20 +505,54 @@ OMX_U64 perf_metrics::processing_time_us()
   return proc_time;
 }
 
+h264_stream_parser::h264_stream_parser()
+{
+  reset();
+#ifdef PANSCAN_HDLR
+  panscan_hdl = new panscan_handler();
+  if (!panscan_hdl)
+  {
+    DEBUG_PRINT_ERROR("ERROR: Panscan hdl was not allocated!");
+  }
+  else if (!panscan_hdl->initialize(10))
+  {
+    DEBUG_PRINT_ERROR("ERROR: Allocating memory for panscan!");
+    delete panscan_hdl;
+    panscan_hdl = NULL;
+  }
+#else
+  memset(&panscan_param, 0, sizeof(panscan_param));
+  panscan_param.rect_id = NO_PAN_SCAN_BIT;
+#endif
+}
+
+h264_stream_parser::~h264_stream_parser()
+{
+#ifdef PANSCAN_HDLR
+  if (panscan_hdl)
+  {
+    delete panscan_hdl;
+    panscan_hdl = NULL;
+  }
+#endif
+}
+
 void h264_stream_parser::reset()
 {
   curr_32_bit = 0;
   bits_read = 0;
   zero_cntr = 0;
   emulation_code_skip_cntr = 0;
+  emulation_sc_enabled = true;
   bitstream = NULL;
   bitstream_bytes = 0;
   memset(&vui_param, 0, sizeof(vui_param));
   vui_param.fixed_fps_prev_ts = LLONG_MAX;
   memset(&sei_buf_period, 0, sizeof(sei_buf_period));
   memset(&sei_pic_timing, 0, sizeof(sei_pic_timing));
-  memset(&pan_scan_param, 0, sizeof(pan_scan_param));
-  pan_scan_param.rect_id = NO_PAN_SCAN_BIT;
+  memset(&frame_packing_arrangement,0,sizeof(frame_packing_arrangement));
+  frame_packing_arrangement.cancel_flag = 1;
+  mbaff_flag = 0;
 }
 
 void h264_stream_parser::init_bitstream(OMX_U8* data, OMX_U32 size)
@@ -539,12 +573,14 @@ void h264_stream_parser::parse_vui(bool vui_in_extradata)
     while (!extract_bits(1) && more_bits()); // Discard VUI enable flag
   if (!more_bits())
     return;
-  if (extract_bits(1)) //aspect_ratio_info_present_flag
-    if (extract_bits(8) == 0xFF) //aspect_ratio_idc
-    {
-      extract_bits(16); //sar_width
-      extract_bits(16); //sar_width
-    }
+
+  vui_param.aspect_ratio_info_present_flag = extract_bits(1); //aspect_ratio_info_present_flag
+  if (vui_param.aspect_ratio_info_present_flag)
+  {
+      DEBUG_PRINT_LOW("Aspect Ratio Info present!");
+      aspect_ratio_info();
+  }
+
   if (extract_bits(1)) //overscan_info_present_flag
     extract_bits(1); //overscan_appropriate_flag
   if (extract_bits(1)) //video_signal_type_present_flag
@@ -604,6 +640,96 @@ void h264_stream_parser::parse_vui(bool vui_in_extradata)
   DEBUG_PRINT_LOW("parse_vui: OUT");
 }
 
+void h264_stream_parser::aspect_ratio_info()
+{
+  DEBUG_PRINT_LOW("aspect_ratio_info: IN");
+  OMX_U32  aspect_ratio_idc = 0;
+  OMX_U32  aspect_ratio_x = 0;
+  OMX_U32  aspect_ratio_y = 0;
+  aspect_ratio_idc = extract_bits(8); //aspect_ratio_idc
+  switch (aspect_ratio_idc)
+  {
+    case 1:
+      aspect_ratio_x = 1;
+      aspect_ratio_y = 1;
+      break;
+    case 2:
+      aspect_ratio_x = 12;
+      aspect_ratio_y = 11;
+      break;
+    case 3:
+      aspect_ratio_x = 10;
+      aspect_ratio_y = 11;
+      break;
+    case 4:
+      aspect_ratio_x = 16;
+      aspect_ratio_y = 11;
+      break;
+    case 5:
+      aspect_ratio_x = 40;
+      aspect_ratio_y = 33;
+      break;
+    case 6:
+      aspect_ratio_x = 24;
+      aspect_ratio_y = 11;
+      break;
+    case 7:
+      aspect_ratio_x = 20;
+      aspect_ratio_y = 11;
+      break;
+    case 8:
+      aspect_ratio_x = 32;
+      aspect_ratio_y = 11;
+      break;
+    case 9:
+      aspect_ratio_x = 80;
+      aspect_ratio_y = 33;
+      break;
+    case 10:
+      aspect_ratio_x = 18;
+      aspect_ratio_y = 11;
+      break;
+    case 11:
+      aspect_ratio_x = 15;
+      aspect_ratio_y = 11;
+      break;
+    case 12:
+      aspect_ratio_x = 64;
+      aspect_ratio_y = 33;
+      break;
+    case 13:
+      aspect_ratio_x = 160;
+      aspect_ratio_y = 99;
+      break;
+    case 14:
+      aspect_ratio_x = 4;
+      aspect_ratio_y = 3;
+      break;
+    case 15:
+      aspect_ratio_x = 3;
+      aspect_ratio_y = 2;
+      break;
+    case 16:
+      aspect_ratio_x = 2;
+      aspect_ratio_y = 1;
+      break;
+    case 255:
+      aspect_ratio_x = extract_bits(16); //sar_width
+      aspect_ratio_y = extract_bits(16); //sar_height
+      break;
+    default:
+      DEBUG_PRINT_LOW("-->aspect_ratio_idc: Reserved Value ");
+      break;
+  }
+  DEBUG_PRINT_LOW("-->aspect_ratio_idc        : %u", aspect_ratio_idc);
+  DEBUG_PRINT_LOW("-->aspect_ratio_x          : %u", aspect_ratio_x);
+  DEBUG_PRINT_LOW("-->aspect_ratio_y          : %u", aspect_ratio_y);
+  vui_param.aspect_ratio_info.aspect_ratio_idc = aspect_ratio_idc;
+  vui_param.aspect_ratio_info.aspect_ratio_x = aspect_ratio_x;
+  vui_param.aspect_ratio_info.aspect_ratio_y = aspect_ratio_y;
+  DEBUG_PRINT_LOW("aspect_ratio_info: OUT");
+}
+
 void h264_stream_parser::hrd_parameters(h264_hrd_param *hrd_param)
 {
   int idx;
@@ -614,6 +740,11 @@ void h264_stream_parser::hrd_parameters(h264_hrd_param *hrd_param)
   DEBUG_PRINT_LOW("-->cpb_cnt        : %u", hrd_param->cpb_cnt);
   DEBUG_PRINT_LOW("-->bit_rate_scale : %u", hrd_param->bit_rate_scale);
   DEBUG_PRINT_LOW("-->cpb_size_scale : %u", hrd_param->cpb_size_scale);
+  if (hrd_param->cpb_cnt > MAX_CPB_COUNT)
+  {
+    DEBUG_PRINT_LOW("ERROR: Invalid hrd_param->cpb_cnt [%u]!", hrd_param->cpb_cnt);
+    return;
+  }
   for (idx = 0; idx < hrd_param->cpb_cnt && more_bits(); idx++)
   {
     hrd_param->bit_rate_value[idx] = uev() + 1;
@@ -670,6 +801,9 @@ void h264_stream_parser::parse_sei()
         case PAN_SCAN_RECT:
           sei_pan_scan();
         break;
+        case SEI_PAYLOAD_FRAME_PACKING_ARRANGEMENT:
+          parse_frame_pack();
+        break;
         default:
           DEBUG_PRINT_LOW("-->SEI payload type [%u] not implemented! size[%u]", payload_type, payload_size);
       }
@@ -697,6 +831,11 @@ void h264_stream_parser::sei_buffering_period()
   if (vui_param.nal_hrd_parameters_present_flag)
   {
     hrd_param = &vui_param.nal_hrd_parameters;
+    if (hrd_param->cpb_cnt > MAX_CPB_COUNT)
+    {
+      DEBUG_PRINT_LOW("ERROR: Invalid hrd_param->cpb_cnt [%u]!", hrd_param->cpb_cnt);
+      return;
+    }
     for (idx = 0; idx < hrd_param->cpb_cnt ; idx++)
     {
       sei_buf_period.is_valid = true;
@@ -709,6 +848,11 @@ void h264_stream_parser::sei_buffering_period()
   if (vui_param.vcl_hrd_parameters_present_flag)
   {
     hrd_param = &vui_param.vcl_hrd_parameters;
+    if (hrd_param->cpb_cnt > MAX_CPB_COUNT)
+    {
+      DEBUG_PRINT_LOW("ERROR: Invalid hrd_param->cpb_cnt [%u]!", hrd_param->cpb_cnt);
+      return;
+    }
     for (idx = 0; idx < hrd_param->cpb_cnt ; idx++)
     {
       sei_buf_period.is_valid = true;
@@ -744,6 +888,8 @@ void h264_stream_parser::sei_picture_timing()
   }
   sei_pic_timing.cpb_removal_delay = extract_bits(cpb_removal_len);
   sei_pic_timing.dpb_output_delay = extract_bits(dpb_output_len);
+  DEBUG_PRINT_LOW("-->cpb_removal_len : %u", cpb_removal_len);
+  DEBUG_PRINT_LOW("-->dpb_output_len  : %u", dpb_output_len);
   DEBUG_PRINT_LOW("-->cpb_removal_delay : %u", sei_pic_timing.cpb_removal_delay);
   DEBUG_PRINT_LOW("-->dpb_output_delay  : %u", sei_pic_timing.dpb_output_delay);
   if (vui_param.pic_struct_present_flag)
@@ -800,7 +946,7 @@ void h264_stream_parser::sei_picture_timing()
         }
         sei_pic_timing.time_offset = 0;
         if (time_offset_len > 0)
-          sei_pic_timing.time_offset |= extract_bits(time_offset_len); //Update to read integer
+          sei_pic_timing.time_offset = iv(time_offset_len);
         DEBUG_PRINT_LOW("-->seconds_value     : %u", sei_pic_timing.seconds_value);
         DEBUG_PRINT_LOW("-->minutes_value     : %u", sei_pic_timing.minutes_value);
         DEBUG_PRINT_LOW("-->hours_value       : %u", sei_pic_timing.hours_value);
@@ -813,42 +959,57 @@ void h264_stream_parser::sei_picture_timing()
 
 void h264_stream_parser::sei_pan_scan()
 {
+#ifdef PANSCAN_HDLR
+  h264_pan_scan *pan_scan_param = panscan_hdl->get_free();
+#else
+  h264_pan_scan *pan_scan_param = &panscan_param;
+#endif
   DEBUG_PRINT_LOW("@@sei_pan_scan: IN");
-  pan_scan_param.rect_id = uev();
-  if (pan_scan_param.rect_id > 0xFF)
+  if (!pan_scan_param)
   {
-    DEBUG_PRINT_ERROR("sei_pan_scan: ERROR: Invalid rect_id[%u]!", pan_scan_param.rect_id);
-    pan_scan_param.rect_id = NO_PAN_SCAN_BIT;
+    DEBUG_PRINT_ERROR("sei_pan_scan: ERROR: Invalid pointer!");
     return;
   }
-  DEBUG_PRINT_LOW("-->rect_id            : %u", pan_scan_param.rect_id);
-  pan_scan_param.rect_cancel_flag = extract_bits(1);
-  DEBUG_PRINT_LOW("-->rect_cancel_flag   : %u", pan_scan_param.rect_cancel_flag);
-  if (pan_scan_param.rect_cancel_flag)
-    pan_scan_param.rect_id = NO_PAN_SCAN_BIT;
+  pan_scan_param->rect_id = uev();
+  if (pan_scan_param->rect_id > 0xFF)
+  {
+    DEBUG_PRINT_ERROR("sei_pan_scan: ERROR: Invalid rect_id[%u]!", pan_scan_param->rect_id);
+    pan_scan_param->rect_id = NO_PAN_SCAN_BIT;
+    return;
+  }
+  DEBUG_PRINT_LOW("-->rect_id            : %u", pan_scan_param->rect_id);
+  pan_scan_param->rect_cancel_flag = extract_bits(1);
+  DEBUG_PRINT_LOW("-->rect_cancel_flag   : %u", pan_scan_param->rect_cancel_flag);
+  if (pan_scan_param->rect_cancel_flag)
+    pan_scan_param->rect_id = NO_PAN_SCAN_BIT;
   else
   {
-    pan_scan_param.cnt = uev() + 1;
-    if (pan_scan_param.cnt > MAX_PAN_SCAN_RECT)
+    pan_scan_param->cnt = uev() + 1;
+    if (pan_scan_param->cnt > MAX_PAN_SCAN_RECT)
     {
-      DEBUG_PRINT_ERROR("sei_pan_scan: ERROR: Invalid num of rect [%u]!", pan_scan_param.cnt);
-      pan_scan_param.rect_id = NO_PAN_SCAN_BIT;
+      DEBUG_PRINT_ERROR("sei_pan_scan: ERROR: Invalid num of rect [%u]!", pan_scan_param->cnt);
+      pan_scan_param->rect_id = NO_PAN_SCAN_BIT;
       return;
     }
-    DEBUG_PRINT_LOW("-->cnt                : %u", pan_scan_param.cnt);
-    for (int i = 0; i < pan_scan_param.cnt; i++)
+    DEBUG_PRINT_LOW("-->cnt                : %u", pan_scan_param->cnt);
+    for (int i = 0; i < pan_scan_param->cnt; i++)
     {
-      pan_scan_param.rect_left_offset[i] = sev();
-      pan_scan_param.rect_right_offset[i] = sev();
-      pan_scan_param.rect_top_offset[i] = sev();
-      pan_scan_param.rect_bottom_offset[i] = sev();
-      DEBUG_PRINT_LOW("-->rect_left_offset   : %u", pan_scan_param.rect_left_offset);
-      DEBUG_PRINT_LOW("-->rect_right_offset  : %u", pan_scan_param.rect_right_offset);
-      DEBUG_PRINT_LOW("-->rect_top_offset    : %u", pan_scan_param.rect_top_offset);
-      DEBUG_PRINT_LOW("-->rect_bottom_offset : %u", pan_scan_param.rect_bottom_offset);
+      pan_scan_param->rect_left_offset[i] = sev();
+      pan_scan_param->rect_right_offset[i] = sev();
+      pan_scan_param->rect_top_offset[i] = sev();
+      pan_scan_param->rect_bottom_offset[i] = sev();
+      DEBUG_PRINT_LOW("-->rect_left_offset   : %d", pan_scan_param->rect_left_offset[i]);
+      DEBUG_PRINT_LOW("-->rect_right_offset  : %d", pan_scan_param->rect_right_offset[i]);
+      DEBUG_PRINT_LOW("-->rect_top_offset    : %d", pan_scan_param->rect_top_offset[i]);
+      DEBUG_PRINT_LOW("-->rect_bottom_offset : %d", pan_scan_param->rect_bottom_offset[i]);
     }
-    pan_scan_param.rect_repetition_period = uev();
-    DEBUG_PRINT_LOW("-->repetition_period  : %u", pan_scan_param.rect_repetition_period);
+    pan_scan_param->rect_repetition_period = uev();
+    DEBUG_PRINT_LOW("-->repetition_period  : %u", pan_scan_param->rect_repetition_period);
+#ifdef PANSCAN_HDLR
+    if (pan_scan_param->rect_repetition_period > 1)
+      // Repetition period is decreased by 2 each time panscan data is used
+      pan_scan_param->rect_repetition_period *= 2;
+#endif
   }
   DEBUG_PRINT_LOW("@@sei_pan_scan: OUT");
 }
@@ -902,7 +1063,7 @@ void h264_stream_parser::parse_sps()
   value = uev(); //pic_width_in_mbs_minus1
   value = uev(); //pic_height_in_map_units_minus1
   if (!extract_bits(1)) //frame_mbs_only_flag
-    extract_bits(1); //mb_adaptive_frame_field_flag
+    mbaff_flag = extract_bits(1); //mb_adaptive_frame_field_flag
   extract_bits(1); //direct_8x8_inference_flag
   if (extract_bits(1)) //frame_cropping_flag
   {
@@ -946,7 +1107,7 @@ OMX_U32 h264_stream_parser::extract_bits(OMX_U32 n)
     value |= (curr_32_bit >> (32 - n));
     if (bits_read < n)
     {
-      DEBUG_PRINT_ERROR("ERROR: extract_bits underflow!");
+      DEBUG_PRINT_LOW("ERROR: extract_bits underflow!");
       value >>= (n - bits_read);
       n = bits_read;
     }
@@ -963,7 +1124,7 @@ void h264_stream_parser::read_word()
   while (bitstream_bytes && bits_read < 32)
   {
     if (*bitstream == EMULATION_PREVENTION_THREE_BYTE &&
-        zero_cntr >= 2)
+        zero_cntr >= 2 && emulation_sc_enabled)
     {
       DEBUG_PRINT_LOW("EMULATION_PREVENTION_THREE_BYTE: Skip 0x03 byte aligned!");
       emulation_code_skip_cntr++;
@@ -996,15 +1157,22 @@ OMX_U32 h264_stream_parser::uev()
 
 bool h264_stream_parser::more_bits()
 {
-	return (bitstream_bytes > 0 || bits_read > 0);
+  return (bitstream_bytes > 0 || bits_read > 0);
 }
 
 OMX_S32 h264_stream_parser::sev()
 {
   OMX_U32 code_num = uev();
   OMX_S32 ret;
-  ret = (int)((code_num + 1) >> 1);
-  return (code_num & 1) ? ret : -ret;
+  ret = (code_num + 1) >> 1;
+  return ((code_num & 1) ? ret : -ret);
+}
+
+OMX_S32 h264_stream_parser::iv(OMX_U32 n_bits)
+{
+  OMX_U32 code_num = extract_bits(n_bits);
+  OMX_S32 ret = (code_num >> (n_bits - 1))? (-1)*(~(code_num & ~(0x1 << (n_bits - 1))) + 1) : code_num;
+  return ret;
 }
 
 OMX_U32 h264_stream_parser::get_nal_unit_type(OMX_U32 *nal_unit_type)
@@ -1069,15 +1237,68 @@ OMX_S64 h264_stream_parser::calculate_fixed_fps_ts(OMX_S64 timestamp, OMX_U32 De
   return vui_param.fixed_fps_prev_ts;
 }
 
+void h264_stream_parser::parse_frame_pack()
+{
+  DEBUG_PRINT_LOW("\n%s:%d parse_frame_pack", __func__, __LINE__);
+  frame_packing_arrangement.id = uev();
+  frame_packing_arrangement.cancel_flag = extract_bits(1);
+  if(!frame_packing_arrangement.cancel_flag) {
+     frame_packing_arrangement.type = extract_bits(7);
+     frame_packing_arrangement.quincunx_sampling_flag = extract_bits(1);
+     frame_packing_arrangement.content_interpretation_type = extract_bits(6);
+     frame_packing_arrangement.spatial_flipping_flag = extract_bits(1);
+     frame_packing_arrangement.frame0_flipped_flag = extract_bits(1);
+     frame_packing_arrangement.field_views_flag = extract_bits(1);
+     frame_packing_arrangement.current_frame_is_frame0_flag = extract_bits(1);
+     frame_packing_arrangement.frame0_self_contained_flag = extract_bits(1);
+     frame_packing_arrangement.frame1_self_contained_flag = extract_bits(1);
+
+     if(!frame_packing_arrangement.quincunx_sampling_flag &&
+        frame_packing_arrangement.type != 5) {
+        frame_packing_arrangement.frame0_grid_position_x = extract_bits(4);
+        frame_packing_arrangement.frame0_grid_position_y = extract_bits(4);
+        frame_packing_arrangement.frame1_grid_position_x = extract_bits(4);
+        frame_packing_arrangement.frame1_grid_position_y = extract_bits(4);
+     }
+     frame_packing_arrangement.reserved_byte = extract_bits(8);
+     frame_packing_arrangement.repetition_period = uev();
+   }
+   frame_packing_arrangement.extension_flag = extract_bits(1);
+
+}
+
 /* API'S EXPOSED TO OMX COMPONENT */
 
-void h264_stream_parser::parse_nal(OMX_U8* data_ptr, OMX_U32 data_len, OMX_U32 nal_type)
+void h264_stream_parser::get_frame_pack_data(
+  OMX_QCOM_FRAME_PACK_ARRANGEMENT *frame_pack)
+{
+   DEBUG_PRINT_LOW("\n%s:%d get frame data", __func__, __LINE__);
+   memcpy(&frame_pack->id,&frame_packing_arrangement.id,
+   FRAME_PACK_SIZE*sizeof(OMX_U32));
+   return;
+}
+
+
+bool h264_stream_parser::is_mbaff()
+{
+   DEBUG_PRINT_LOW("\n%s:%d MBAFF flag=%d", __func__, __LINE__,mbaff_flag);
+   return mbaff_flag;
+}
+
+void h264_stream_parser::get_frame_rate(OMX_U32 *frame_rate)
+{
+  if (vui_param.num_units_in_tick != 0)
+    *frame_rate = vui_param.time_scale / (2 * vui_param.num_units_in_tick);
+}
+
+void h264_stream_parser::parse_nal(OMX_U8* data_ptr, OMX_U32 data_len, OMX_U32 nal_type, bool enable_emu_sc)
 {
   OMX_U32 nal_unit_type = NALU_TYPE_UNSPECIFIED, cons_bytes = 0;
   DEBUG_PRINT_LOW("parse_nal(): IN nal_type(%lu)", nal_type);
   if (!data_len)
     return;
   init_bitstream(data_ptr, data_len);
+  emulation_sc_enabled = enable_emu_sc;
   if (nal_type != NALU_TYPE_VUI)
   {
     cons_bytes = get_nal_unit_type(&nal_unit_type);
@@ -1092,13 +1313,16 @@ void h264_stream_parser::parse_nal(OMX_U8* data_ptr, OMX_U32 data_len, OMX_U32 n
     case NALU_TYPE_SPS:
       if (more_bits())
         parse_sps();
+#ifdef PANSCAN_HDLR
+      panscan_hdl->get_free();
+#endif
     break;
     case NALU_TYPE_SEI:
       init_bitstream(data_ptr + cons_bytes, data_len - cons_bytes);
       parse_sei();
     break;
     case NALU_TYPE_VUI:
-      parse_vui();
+      parse_vui(true);
     break;
     default:
       DEBUG_PRINT_LOW("nal_unit_type received : %lu", nal_type);
@@ -1106,21 +1330,52 @@ void h264_stream_parser::parse_nal(OMX_U8* data_ptr, OMX_U32 data_len, OMX_U32 n
   DEBUG_PRINT_LOW("parse_nal(): OUT");
 }
 
-void h264_stream_parser::fill_pan_scan_data(OMX_QCOM_PANSCAN *dest_pan_scan)
+#ifdef PANSCAN_HDLR
+void h264_stream_parser::update_panscan_data(OMX_S64 timestamp)
 {
-  if (!(pan_scan_param.rect_id & NO_PAN_SCAN_BIT))
+  panscan_hdl->update_last(timestamp);
+}
+#endif
+
+void h264_stream_parser::fill_aspect_ratio_info(OMX_QCOM_ASPECT_RATIO *dest_aspect_ratio)
+{
+  if(dest_aspect_ratio && vui_param.aspect_ratio_info_present_flag)
   {
-    dest_pan_scan->numWindows = pan_scan_param.cnt;
-    for (int i = 0; i < dest_pan_scan->numWindows; i++)
-    {
-      dest_pan_scan->window[i].x = pan_scan_param.rect_left_offset[i];
-      dest_pan_scan->window[i].y = pan_scan_param.rect_top_offset[i];
-      dest_pan_scan->window[i].dx = pan_scan_param.rect_right_offset[i];
-      dest_pan_scan->window[i].dy = pan_scan_param.rect_bottom_offset[i];
-    }
-    if (pan_scan_param.rect_repetition_period == 0)
-      pan_scan_param.rect_id = NO_PAN_SCAN_BIT;
+    dest_aspect_ratio->aspectRatioX = vui_param.aspect_ratio_info.aspect_ratio_x;
+    dest_aspect_ratio->aspectRatioY = vui_param.aspect_ratio_info.aspect_ratio_y;
   }
+}
+
+void h264_stream_parser::fill_pan_scan_data(OMX_QCOM_PANSCAN *dest_pan_scan, OMX_S64 timestamp)
+{
+#ifdef PANSCAN_HDLR
+  h264_pan_scan *pan_scan_param = panscan_hdl->get_populated(timestamp);
+#else
+  h264_pan_scan *pan_scan_param = &panscan_param;
+#endif
+  if (pan_scan_param)
+    if (!(pan_scan_param->rect_id & NO_PAN_SCAN_BIT))
+    {
+      PRINT_PANSCAN_PARAM(*pan_scan_param);
+      dest_pan_scan->numWindows = pan_scan_param->cnt;
+      for (int i = 0; i < dest_pan_scan->numWindows; i++)
+      {
+        dest_pan_scan->window[i].x = pan_scan_param->rect_left_offset[i];
+        dest_pan_scan->window[i].y = pan_scan_param->rect_top_offset[i];
+        dest_pan_scan->window[i].dx = pan_scan_param->rect_right_offset[i];
+        dest_pan_scan->window[i].dy = pan_scan_param->rect_bottom_offset[i];
+      }
+#ifndef PANSCAN_HDLR
+      if (pan_scan_param->rect_repetition_period == 0)
+        pan_scan_param->rect_id = NO_PAN_SCAN_BIT;
+      else if (pan_scan_param->rect_repetition_period > 1)
+        pan_scan_param->rect_repetition_period =
+        (pan_scan_param->rect_repetition_period == 2)? 0 :
+        (pan_scan_param->rect_repetition_period - 1);
+#endif
+    }
+    else
+      pan_scan_param->rect_repetition_period = 0;
 }
 
 OMX_S64 h264_stream_parser::process_ts_with_sei_vui(OMX_S64 timestamp)
@@ -1169,3 +1424,189 @@ OMX_S64 h264_stream_parser::process_ts_with_sei_vui(OMX_S64 timestamp)
   sei_pic_timing.is_valid = false; // SEI data is valid only for current frame
   return clock_ts;
 }
+
+#ifdef PANSCAN_HDLR
+
+panscan_handler::panscan_handler() : panscan_data(NULL) {}
+
+panscan_handler::~panscan_handler()
+{
+  if (panscan_data)
+  {
+    free(panscan_data);
+    panscan_data = NULL;
+  }
+}
+
+bool panscan_handler::initialize(int num_data)
+{
+  bool ret = false;
+  if (!panscan_data)
+  {
+    panscan_data = (PANSCAN_NODE *) malloc (sizeof(PANSCAN_NODE) * num_data);
+    if (panscan_data)
+    {
+      panscan_free.add_multiple(panscan_data, num_data);
+      ret = true;
+    }
+  }
+  else
+  {
+    DEBUG_PRINT_ERROR("ERROR: Old panscan memory must be freed to allocate new");
+  }
+  return ret;
+}
+
+h264_pan_scan *panscan_handler::get_free()
+{
+  h264_pan_scan *data = NULL;
+  PANSCAN_NODE *panscan_node = panscan_used.watch_last();
+  panscan_node = (!panscan_node || VALID_TS(panscan_node->start_ts))?
+                 panscan_free.remove_first() :
+                 panscan_used.remove_last();
+  if (panscan_node)
+  {
+    panscan_node->start_ts = LLONG_MAX;
+    panscan_node->end_ts = LLONG_MAX;
+    panscan_node->pan_scan_param.rect_id = NO_PAN_SCAN_BIT;
+    panscan_node->active = false;
+    panscan_used.add_last(panscan_node);
+    data = &panscan_node->pan_scan_param;
+  }
+  return data;
+}
+
+h264_pan_scan *panscan_handler::get_populated(OMX_S64 frame_ts)
+{
+  h264_pan_scan *data = NULL;
+  PANSCAN_NODE *panscan_node = panscan_used.watch_first();
+  while (panscan_node && !data)
+  {
+    if (VALID_TS(panscan_node->start_ts))
+    {
+      if (panscan_node->active && frame_ts < panscan_node->start_ts)
+        panscan_node->start_ts = frame_ts;
+      if (frame_ts >= panscan_node->start_ts)
+        if (frame_ts < panscan_node->end_ts)
+        {
+          data = &panscan_node->pan_scan_param;
+          panscan_node->active = true;
+        }
+        else
+        {
+          panscan_free.add_last(panscan_used.remove_first());
+          panscan_node = panscan_used.watch_first();
+        }
+      else
+        // Finish search if current timestamp has not reached
+        // start timestamp of first panscan data.
+        panscan_node = NULL;
+    }
+    else
+    {
+      // Only one panscan data is stored for clips
+      // with invalid timestamps in every frame
+      data = &panscan_node->pan_scan_param;
+      panscan_node->active = true;
+    }
+  }
+  if (data)
+    if (data->rect_repetition_period == 0)
+      panscan_free.add_last(panscan_used.remove_first());
+    else if (data->rect_repetition_period > 1)
+      data->rect_repetition_period -= 2;
+  PRINT_PANSCAN_DATA(panscan_node);
+  return data;
+}
+
+void panscan_handler::update_last(OMX_S64 frame_ts)
+{
+  PANSCAN_NODE *panscan_node = panscan_used.watch_last();
+  if (panscan_node && !VALID_TS(panscan_node->start_ts))
+  {
+    panscan_node->start_ts = frame_ts;
+    PRINT_PANSCAN_DATA(panscan_node);
+    if (panscan_node->prev)
+    {
+      if (frame_ts < panscan_node->prev->end_ts)
+        panscan_node->prev->end_ts = frame_ts;
+      else if (!VALID_TS(frame_ts))
+        panscan_node->prev->pan_scan_param.rect_repetition_period = 0;
+      PRINT_PANSCAN_DATA(panscan_node->prev);
+    }
+  }
+}
+
+template <class NODE_STRUCT>
+void omx_dl_list<NODE_STRUCT>::add_multiple(NODE_STRUCT *data_arr, int data_num)
+{
+  for (int idx = 0; idx < data_num; idx++)
+    add_last(&data_arr[idx]);
+}
+
+template <class NODE_STRUCT>
+NODE_STRUCT *omx_dl_list<NODE_STRUCT>::remove_first()
+{
+  NODE_STRUCT *data = head;
+  if (head)
+  {
+    if (head->next)
+    {
+      head = head->next;
+      head->prev = NULL;
+    }
+    else
+      head = tail = NULL;
+    data->next = data->prev = NULL;
+  }
+  return data;
+}
+
+template <class NODE_STRUCT>
+NODE_STRUCT *omx_dl_list<NODE_STRUCT>::remove_last()
+{
+  NODE_STRUCT *data = tail;
+  if (tail)
+  {
+    if (tail->prev)
+    {
+      tail = tail->prev;
+      tail->next = NULL;
+    }
+    else
+      head = tail = NULL;
+    data->next = data->prev = NULL;
+  }
+  return data;
+}
+
+template <class NODE_STRUCT>
+void omx_dl_list<NODE_STRUCT>::add_last(NODE_STRUCT* data_ptr)
+{
+  if (data_ptr)
+  {
+    data_ptr->next = NULL;
+    data_ptr->prev = tail;
+    if (tail)
+    {
+      tail->next = data_ptr;
+      tail = data_ptr;
+    }
+    else
+      head = tail = data_ptr;
+  }
+}
+
+template <class NODE_STRUCT>
+NODE_STRUCT* omx_dl_list<NODE_STRUCT>::watch_first()
+{
+  return head;
+}
+
+template <class NODE_STRUCT>
+NODE_STRUCT* omx_dl_list<NODE_STRUCT>::watch_last()
+{
+  return tail;
+}
+
+#endif

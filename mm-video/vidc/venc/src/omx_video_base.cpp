@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2010, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2012, Code Aurora Forum. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -44,7 +44,11 @@ ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
-
+#include <sys/prctl.h>
+#ifdef _ANDROID_ICS_
+#include <media/stagefright/HardwareAPI.h>
+#include <gralloc_priv.h>
+#endif
 #define H264_SUPPORTED_WIDTH (480)
 #define H264_SUPPORTED_HEIGHT (368)
 
@@ -87,14 +91,6 @@ typedef struct OMXComponentCapabilityFlagsType
 extern FILE *outputBufferFile1;
 #endif
 
-#ifdef MAX_RES_720P
-static const char* PMEM_DEVICE = "/dev/pmem_adsp";
-#elif MAX_RES_1080P
-static const char* PMEM_DEVICE = "/dev/pmem_smipool";
-#else
-#error PMEM_DEVICE cannot be determined.
-#endif
-
 void* message_thread(void *input)
 {
   omx_video* omx = reinterpret_cast<omx_video*>(input);
@@ -102,6 +98,7 @@ void* message_thread(void *input)
   int n;
 
   DEBUG_PRINT_LOW("omx_venc: message thread start\n");
+  prctl(PR_SET_NAME, (unsigned long)"VideoEncMsgThread", 0, 0, 0);
   while(1)
   {
     n = read(omx->m_pipe_in, &id, 1);
@@ -202,7 +199,7 @@ unsigned omx_video::omx_cmd_queue::get_q_msg_type()
 VideoHeap::VideoHeap(int fd, size_t size, void* base)
 {
   // dup file descriptor, map once, use pmem
-  init(dup(fd), base, size, 0 , PMEM_DEVICE);
+  init(dup(fd), base, size, 0 , MEM_DEVICE);
 }
 #endif // _ANDROID_
 
@@ -223,6 +220,12 @@ omx_video::omx_video(): m_state(OMX_StateInvalid),
                         m_app_data(NULL),
                         m_inp_mem_ptr(NULL),
                         m_out_mem_ptr(NULL),
+                        m_pInput_pmem(NULL),
+                        m_pOutput_pmem(NULL),
+#ifdef USE_ION
+                        m_pInput_ion(NULL),
+                        m_pOutput_ion(NULL),
+#endif
                         pending_input_buffers(0),
                         pending_output_buffers(0),
                         m_out_bm_count(0),
@@ -1442,6 +1445,12 @@ OMX_ERRORTYPE  omx_video::get_parameter(OMX_IN OMX_HANDLETYPE     hComp,
         DEBUG_PRINT_LOW("\n i/p actual cnt = %d\n", m_sInPortDef.nBufferCountActual);
         DEBUG_PRINT_LOW("\n i/p min cnt = %d\n", m_sInPortDef.nBufferCountMin);
         memcpy(portDefn, &m_sInPortDef, sizeof(m_sInPortDef));
+#ifdef _ANDROID_ICS_
+        if(meta_mode_enable)
+        {
+          portDefn->nBufferSize = sizeof(encoder_media_buffer_type);
+        }
+#endif
       }
       else if(portDefn->nPortIndex == (OMX_U32) PORT_INDEX_OUT)
       {
@@ -1575,7 +1584,7 @@ OMX_ERRORTYPE  omx_video::get_parameter(OMX_IN OMX_HANDLETYPE     hComp,
       DEBUG_PRINT_LOW("Getparameter: OMX_IndexParamStandardComponentRole %d\n",paramIndex);
       if(NULL != comp_role->cRole)
       {
-        strncpy((char*)comp_role->cRole,(const char*)m_cRole,OMX_MAX_STRINGNAME_SIZE);
+        strlcpy((char*)comp_role->cRole,(const char*)m_cRole,OMX_MAX_STRINGNAME_SIZE);
       }
       else
       {
@@ -1764,12 +1773,17 @@ OMX_ERRORTYPE  omx_video::get_extension_index(OMX_IN OMX_HANDLETYPE      hComp,
                                               OMX_IN OMX_STRING      paramName,
                                               OMX_OUT OMX_INDEXTYPE* indexType)
 {
-  DEBUG_PRINT_ERROR("ERROR: get_extension_index: Error, Not implemented\n");
   if(m_state == OMX_StateInvalid)
   {
     DEBUG_PRINT_ERROR("ERROR: Get Extension Index in Invalid State\n");
     return OMX_ErrorInvalidState;
   }
+#ifdef _ANDROID_ICS_
+  if (!strncmp(paramName, "OMX.google.android.index.storeMetaDataInBuffers",sizeof("OMX.google.android.index.storeMetaDataInBuffers") - 1)) {
+        *indexType = (OMX_INDEXTYPE)OMX_QcomIndexParamVideoEncodeMetaBufferMode;
+        return OMX_ErrorNone;
+  }
+#endif
   return OMX_ErrorNotImplemented;
 }
 
@@ -1870,9 +1884,23 @@ OMX_ERRORTYPE  omx_video::use_input_buffer(
       DEBUG_PRINT_ERROR("\nERROR: calloc() Failed for m_pInput_pmem");
       return OMX_ErrorInsufficientResources;
     }
+#ifdef USE_ION
+    m_pInput_ion = (struct venc_ion *) calloc(sizeof (struct venc_ion), m_sInPortDef.nBufferCountActual);
+    if(m_pInput_ion == NULL)
+    {
+      DEBUG_PRINT_ERROR("\nERROR: calloc() Failed for m_pInput_ion");
+      return OMX_ErrorInsufficientResources;
+    }
+#endif
+
     for(i=0; i< m_sInPortDef.nBufferCountActual; i++)
     {
       m_pInput_pmem[i].fd = -1;
+#ifdef USE_ION
+      m_pInput_ion[i].ion_device_fd =-1;
+      m_pInput_ion[i].fd_ion_data.fd =-1;
+      m_pInput_ion[i].ion_alloc_data.handle=NULL;
+#endif
     }
 
   }
@@ -1900,10 +1928,20 @@ OMX_ERRORTYPE  omx_video::use_input_buffer(
 
     if(!m_use_input_pmem)
     {
-      m_pInput_pmem[i].fd = open (PMEM_DEVICE,O_RDWR);
+#ifdef USE_ION
+      m_pInput_ion[i].ion_device_fd = alloc_map_ion_memory(m_sInPortDef.nBufferSize,
+                                      &m_pInput_ion[i].ion_alloc_data,
+                                      &m_pInput_ion[i].fd_ion_data);
+      if(m_pInput_ion[i].ion_device_fd < 0) {
+        DEBUG_PRINT_ERROR("\nERROR:ION device open() Failed");
+        return OMX_ErrorInsufficientResources;
+      }
+      m_pInput_pmem[i].fd = m_pInput_ion[i].fd_ion_data.fd;
+#else
+      m_pInput_pmem[i].fd = open (MEM_DEVICE,O_RDWR);
       if(m_pInput_pmem[i].fd == 0)
       {
-        m_pInput_pmem[i].fd = open (PMEM_DEVICE,O_RDWR);
+        m_pInput_pmem[i].fd = open (MEM_DEVICE,O_RDWR);
       }
 
       if(m_pInput_pmem[i] .fd < 0)
@@ -1911,6 +1949,7 @@ OMX_ERRORTYPE  omx_video::use_input_buffer(
         DEBUG_PRINT_ERROR("\nERROR: /dev/pmem_adsp open() Failed");
         return OMX_ErrorInsufficientResources;
       }
+#endif
       m_pInput_pmem[i].size = m_sInPortDef.nBufferSize;
       m_pInput_pmem[i].offset = 0;
       m_pInput_pmem[i].buffer = (unsigned char *)mmap(NULL,m_pInput_pmem[i].size,PROT_READ|PROT_WRITE,
@@ -1919,6 +1958,10 @@ OMX_ERRORTYPE  omx_video::use_input_buffer(
       if(m_pInput_pmem[i].buffer == MAP_FAILED)
       {
         DEBUG_PRINT_ERROR("\nERROR: mmap() Failed");
+        close(m_pInput_pmem[i].fd);
+#ifdef USE_ION
+        free_ion_memory(&m_pInput_ion[i]);
+#endif
         return OMX_ErrorInsufficientResources;
       }
     }
@@ -2026,12 +2069,18 @@ OMX_ERRORTYPE  omx_video::use_output_buffer(
       DEBUG_PRINT_ERROR("\nERROR: calloc() Failed for m_pOutput_pmem");
       return OMX_ErrorInsufficientResources;
     }
-
+#ifdef USE_ION
+    m_pOutput_ion = (struct venc_ion *) calloc(sizeof (struct venc_ion), m_sOutPortDef.nBufferCountActual);
+    if(m_pOutput_ion == NULL)
+    {
+      DEBUG_PRINT_ERROR("\nERROR: calloc() Failed for m_pOutput_ion");
+      return OMX_ErrorInsufficientResources;
+    }
+#endif
     if(m_out_mem_ptr)
     {
       bufHdr          =  m_out_mem_ptr;
       DEBUG_PRINT_LOW("Memory Allocation Succeeded for OUT port%p\n",m_out_mem_ptr);
-
       // Settting the entire storage nicely
       for(i=0; i < m_sOutPortDef.nBufferCountActual ; i++)
       {
@@ -2044,6 +2093,11 @@ OMX_ERRORTYPE  omx_video::use_output_buffer(
         bufHdr->pBuffer            = NULL;
         bufHdr++;
         m_pOutput_pmem[i].fd = -1;
+#ifdef USE_ION
+        m_pOutput_ion[i].ion_device_fd =-1;
+        m_pOutput_ion[i].fd_ion_data.fd=-1;
+        m_pOutput_ion[i].ion_alloc_data.handle =NULL;
+#endif
       }
     }
     else
@@ -2072,11 +2126,22 @@ OMX_ERRORTYPE  omx_video::use_output_buffer(
 
       if(!m_use_output_pmem)
       {
-        m_pOutput_pmem[i].fd = open (PMEM_DEVICE,O_RDWR);
+#ifdef USE_ION
+        m_pOutput_ion[i].ion_device_fd = alloc_map_ion_memory(
+                                         m_sOutPortDef.nBufferSize,
+                                         &m_pOutput_ion[i].ion_alloc_data,
+                                         &m_pOutput_ion[i].fd_ion_data);
+      if(m_pOutput_ion[i].ion_device_fd < 0) {
+        DEBUG_PRINT_ERROR("\nERROR:ION device open() Failed");
+        return OMX_ErrorInsufficientResources;
+      }
+      m_pOutput_pmem[i].fd = m_pOutput_ion[i].fd_ion_data.fd;
+#else
+        m_pOutput_pmem[i].fd = open (MEM_DEVICE,O_RDWR);
 
         if(m_pOutput_pmem[i].fd == 0)
         {
-          m_pOutput_pmem[i].fd = open (PMEM_DEVICE,O_RDWR);
+          m_pOutput_pmem[i].fd = open (MEM_DEVICE,O_RDWR);
         }
 
         if(m_pOutput_pmem[i].fd < 0)
@@ -2084,6 +2149,7 @@ OMX_ERRORTYPE  omx_video::use_output_buffer(
           DEBUG_PRINT_ERROR("\nERROR: /dev/pmem_adsp open() Failed");
           return OMX_ErrorInsufficientResources;
         }
+#endif
         m_pOutput_pmem[i].size = m_sOutPortDef.nBufferSize;
         m_pOutput_pmem[i].offset = 0;
         m_pOutput_pmem[i].buffer = (unsigned char *)mmap(NULL,m_pOutput_pmem[i].size,PROT_READ|PROT_WRITE,
@@ -2091,6 +2157,10 @@ OMX_ERRORTYPE  omx_video::use_output_buffer(
         if(m_pOutput_pmem[i].buffer == MAP_FAILED)
         {
           DEBUG_PRINT_ERROR("\nERROR: mmap() Failed");
+          close(m_pOutput_pmem[i].fd);
+#ifdef USE_ION
+          free_ion_memory(&m_pOutput_ion[i]);
+#endif
           return OMX_ErrorInsufficientResources;
         }
       }
@@ -2227,18 +2297,33 @@ OMX_ERRORTYPE omx_video::free_input_buffer(OMX_BUFFERHEADERTYPE *bufferHdr)
   }
 
   index = bufferHdr - m_inp_mem_ptr;
+#ifdef _ANDROID_ICS_
+  if(meta_mode_enable)
+  {
+    if(index < m_sInPortDef.nBufferCountActual)
+    {
+      memset(&meta_buffer_hdr[index], 0, sizeof(meta_buffer_hdr[index]));
+      memset(&meta_buffers[index], 0, sizeof(meta_buffers[index]));
+    }
+    return OMX_ErrorNone;
+  }
+#endif
+  if(index < m_sInPortDef.nBufferCountActual &&
+     dev_free_buf(&m_pInput_pmem[index],PORT_INDEX_IN) != true)
+  {
+    DEBUG_PRINT_ERROR("\nERROR: dev_free_buf() Failed for i/p buf");
+  }
 
   if(index < m_sInPortDef.nBufferCountActual && m_pInput_pmem)
   {
     if(m_pInput_pmem[index].fd > 0 && input_use_buffer == false)
     {
       DEBUG_PRINT_LOW("\n FreeBuffer:: i/p AllocateBuffer case");
-      if(dev_free_buf(&m_pInput_pmem[index],PORT_INDEX_IN) != true)
-      {
-        DEBUG_PRINT_ERROR("\nERROR: dev_free_buf() Failed for i/p buf");
-      }
       munmap (m_pInput_pmem[index].buffer,m_pInput_pmem[index].size);
       close (m_pInput_pmem[index].fd);
+#ifdef USE_ION
+      free_ion_memory(&m_pInput_ion[index]);
+#endif
       m_pInput_pmem[index].fd = -1;
     }
     else if(m_pInput_pmem[index].fd > 0 && (input_use_buffer == true &&
@@ -2251,6 +2336,9 @@ OMX_ERRORTYPE omx_video::free_input_buffer(OMX_BUFFERHEADERTYPE *bufferHdr)
       }
       munmap (m_pInput_pmem[index].buffer,m_pInput_pmem[index].size);
       close (m_pInput_pmem[index].fd);
+#ifdef USE_ION
+      free_ion_memory(&m_pInput_ion[index]);
+#endif
       m_pInput_pmem[index].fd = -1;
     }
     else
@@ -2274,17 +2362,22 @@ OMX_ERRORTYPE omx_video::free_output_buffer(OMX_BUFFERHEADERTYPE *bufferHdr)
   }
   index = bufferHdr - m_out_mem_ptr;
 
+  if(index < m_sOutPortDef.nBufferCountActual &&
+     dev_free_buf(&m_pOutput_pmem[index],PORT_INDEX_OUT) != true)
+  {
+    DEBUG_PRINT_ERROR("ERROR: dev_free_buf Failed for o/p buf");
+  }
+
   if(index < m_sOutPortDef.nBufferCountActual && m_pOutput_pmem)
   {
     if(m_pOutput_pmem[index].fd > 0 && output_use_buffer == false )
     {
       DEBUG_PRINT_LOW("\n FreeBuffer:: o/p AllocateBuffer case");
-      if(dev_free_buf(&m_pOutput_pmem[index],PORT_INDEX_OUT) != true)
-      {
-        DEBUG_PRINT_ERROR("ERROR: dev_free_buf Failed for o/p buf");
-      }
       munmap (m_pOutput_pmem[index].buffer,m_pOutput_pmem[index].size);
       close (m_pOutput_pmem[index].fd);
+#ifdef USE_ION
+      free_ion_memory(&m_pOutput_ion[index]);
+#endif
       m_pOutput_pmem[index].fd = -1;
     }
     else if( m_pOutput_pmem[index].fd > 0 && (output_use_buffer == true
@@ -2297,6 +2390,9 @@ OMX_ERRORTYPE omx_video::free_output_buffer(OMX_BUFFERHEADERTYPE *bufferHdr)
       }
       munmap (m_pOutput_pmem[index].buffer,m_pOutput_pmem[index].size);
       close (m_pOutput_pmem[index].fd);
+#ifdef USE_ION
+      free_ion_memory(&m_pOutput_ion[index]);
+#endif
       m_pOutput_pmem[index].fd = -1;
     }
     else
@@ -2306,8 +2402,40 @@ OMX_ERRORTYPE omx_video::free_output_buffer(OMX_BUFFERHEADERTYPE *bufferHdr)
   }
   return OMX_ErrorNone;
 }
-
-
+#ifdef _ANDROID_ICS_
+OMX_ERRORTYPE omx_video::allocate_input_meta_buffer(
+                    OMX_BUFFERHEADERTYPE **bufferHdr,
+                    OMX_PTR              appData,
+                    OMX_U32              bytes)
+{
+  unsigned index = 0;
+  if(!bufferHdr || bytes != sizeof(encoder_media_buffer_type))
+  {
+    DEBUG_PRINT_ERROR("wrong params allocate_input_meta_buffer Hdr %p len %d",
+                     bufferHdr,bytes);
+    return OMX_ErrorBadParameter;
+  }
+  if(!m_inp_mem_ptr)
+    m_inp_mem_ptr = meta_buffer_hdr;
+  for(index = 0;((index < m_sInPortDef.nBufferCountActual) &&
+      meta_buffer_hdr[index].pBuffer); index++);
+  if(index == m_sInPortDef.nBufferCountActual)
+  {
+    DEBUG_PRINT_ERROR("All buffers are allocated input_meta_buffer");
+    return OMX_ErrorBadParameter;
+  }
+  BITMASK_SET(&m_inp_bm_count,index);
+  *bufferHdr = &meta_buffer_hdr[index];
+  memset(&meta_buffer_hdr[index], 0, sizeof(meta_buffer_hdr[index]));
+  meta_buffer_hdr[index].nSize = sizeof(meta_buffer_hdr[index]);
+  meta_buffer_hdr[index].nAllocLen = bytes;
+  meta_buffer_hdr[index].nVersion.nVersion = OMX_SPEC_VERSION;
+  meta_buffer_hdr[index].nInputPortIndex = PORT_INDEX_IN;
+  meta_buffer_hdr[index].pBuffer = (OMX_U8*)&meta_buffers[index];
+  meta_buffer_hdr[index].pAppPrivate = appData;
+  return OMX_ErrorNone;
+}
+#endif
 /* ======================================================================
 FUNCTION
   omx_venc::AllocateInputBuffer
@@ -2358,10 +2486,22 @@ OMX_ERRORTYPE  omx_video::allocate_input_buffer(
       DEBUG_PRINT_ERROR("\nERROR: calloc() Failed for m_pInput_pmem");
       return OMX_ErrorInsufficientResources;
     }
-
+#ifdef USE_ION
+    m_pInput_ion = (struct venc_ion *) calloc(sizeof (struct venc_ion), m_sInPortDef.nBufferCountActual);
+    if(m_pInput_ion == NULL)
+    {
+      DEBUG_PRINT_ERROR("\nERROR: calloc() Failed for m_pInput_ion");
+      return OMX_ErrorInsufficientResources;
+    }
+#endif
     for(i=0; i< m_sInPortDef.nBufferCountActual; i++)
     {
       m_pInput_pmem[i].fd = -1;
+#ifdef USE_ION
+      m_pInput_ion[i].ion_device_fd =-1;
+      m_pInput_ion[i].fd_ion_data.fd =-1;
+      m_pInput_ion[i].ion_alloc_data.handle=NULL;
+#endif
     }
   }
 
@@ -2372,7 +2512,6 @@ OMX_ERRORTYPE  omx_video::allocate_input_buffer(
       break;
     }
   }
-
   if(i < m_sInPortDef.nBufferCountActual)
   {
 
@@ -2383,11 +2522,22 @@ OMX_ERRORTYPE  omx_video::allocate_input_buffer(
     (*bufferHdr)->pAppPrivate       = appData;
     (*bufferHdr)->nInputPortIndex   = PORT_INDEX_IN;
 
-    m_pInput_pmem[i].fd = open (PMEM_DEVICE,O_RDWR);
+#ifdef USE_ION
+    m_pInput_ion[i].ion_device_fd = alloc_map_ion_memory(m_sInPortDef.nBufferSize,
+                                    &m_pInput_ion[i].ion_alloc_data,
+                                    &m_pInput_ion[i].fd_ion_data);
+    if(m_pInput_ion[i].ion_device_fd < 0) {
+      DEBUG_PRINT_ERROR("\nERROR:ION device open() Failed");
+      return OMX_ErrorInsufficientResources;
+    }
+
+    m_pInput_pmem[i].fd = m_pInput_ion[i].fd_ion_data.fd;
+#else
+    m_pInput_pmem[i].fd = open (MEM_DEVICE,O_RDWR);
 
     if(m_pInput_pmem[i].fd == 0)
     {
-      m_pInput_pmem[i].fd = open (PMEM_DEVICE,O_RDWR);
+      m_pInput_pmem[i].fd = open (MEM_DEVICE,O_RDWR);
     }
 
     if(m_pInput_pmem[i].fd < 0)
@@ -2395,6 +2545,7 @@ OMX_ERRORTYPE  omx_video::allocate_input_buffer(
       DEBUG_PRINT_ERROR("\nERROR: /dev/pmem_adsp open() Failed\n");
       return OMX_ErrorInsufficientResources;
     }
+#endif
     m_pInput_pmem[i].size = m_sInPortDef.nBufferSize;
     m_pInput_pmem[i].offset = 0;
 
@@ -2402,7 +2553,11 @@ OMX_ERRORTYPE  omx_video::allocate_input_buffer(
                                                     MAP_SHARED,m_pInput_pmem[i].fd,0);
     if(m_pInput_pmem[i].buffer == MAP_FAILED)
     {
-      DEBUG_PRINT_ERROR("\nERROR: mmap FAILED\n");
+      DEBUG_PRINT_ERROR("\nERROR: mmap FAILED= %d\n", errno);
+      close(m_pInput_pmem[i].fd);
+#ifdef USE_ION
+      free_ion_memory(&m_pInput_ion[i]);
+#endif
       return OMX_ErrorInsufficientResources;
     }
 
@@ -2451,6 +2606,7 @@ OMX_ERRORTYPE  omx_video::allocate_output_buffer(
   OMX_ERRORTYPE eRet = OMX_ErrorNone;
   OMX_BUFFERHEADERTYPE       *bufHdr= NULL; // buffer header
   unsigned                         i= 0; // Temporary counter
+
   DEBUG_PRINT_HIGH("\n allocate_output_buffer()::");
   if(!m_out_mem_ptr)
   {
@@ -2467,8 +2623,20 @@ OMX_ERRORTYPE  omx_video::allocate_output_buffer(
      */
     m_out_mem_ptr = (OMX_BUFFERHEADERTYPE  *)calloc(nBufHdrSize,1);
 
+#ifdef USE_ION
+    m_pOutput_ion = (struct venc_ion *) calloc(sizeof (struct venc_ion), m_sOutPortDef.nBufferCountActual);
+    if(m_pOutput_ion == NULL)
+    {
+      DEBUG_PRINT_ERROR("\nERROR: calloc() Failed for m_pOutput_ion");
+      return OMX_ErrorInsufficientResources;
+    }
+#endif
     m_pOutput_pmem = (struct pmem *) calloc(sizeof(struct pmem), m_sOutPortDef.nBufferCountActual);
-
+    if(m_pOutput_pmem == NULL)
+    {
+      DEBUG_PRINT_ERROR("\nERROR: calloc() Failed for m_pOutput_pmem");
+      return OMX_ErrorInsufficientResources;
+    }
     if(m_out_mem_ptr && m_pOutput_pmem)
     {
       bufHdr          =  m_out_mem_ptr;
@@ -2485,6 +2653,11 @@ OMX_ERRORTYPE  omx_video::allocate_output_buffer(
         bufHdr->pBuffer            = NULL;
         bufHdr++;
         m_pOutput_pmem[i].fd = -1;
+#ifdef USE_ION
+        m_pOutput_ion[i].ion_device_fd =-1;
+        m_pOutput_ion[i].fd_ion_data.fd=-1;
+        m_pOutput_ion[i].ion_alloc_data.handle =NULL;
+#endif
       }
     }
     else
@@ -2503,15 +2676,24 @@ OMX_ERRORTYPE  omx_video::allocate_output_buffer(
       break;
     }
   }
-
   if(eRet == OMX_ErrorNone)
   {
     if(i < m_sOutPortDef.nBufferCountActual)
     {
-      m_pOutput_pmem[i].fd = open (PMEM_DEVICE,O_RDWR);
+#ifdef USE_ION
+      m_pOutput_ion[i].ion_device_fd = alloc_map_ion_memory(m_sOutPortDef.nBufferSize,
+                                       &m_pOutput_ion[i].ion_alloc_data,
+                                       &m_pOutput_ion[i].fd_ion_data);
+      if(m_pOutput_ion[i].ion_device_fd < 0) {
+        DEBUG_PRINT_ERROR("\nERROR:ION device open() Failed");
+        return OMX_ErrorInsufficientResources;
+      }
+      m_pOutput_pmem[i].fd = m_pOutput_ion[i].fd_ion_data.fd;
+#else
+      m_pOutput_pmem[i].fd = open (MEM_DEVICE,O_RDWR);
       if(m_pOutput_pmem[i].fd == 0)
       {
-        m_pOutput_pmem[i].fd = open (PMEM_DEVICE,O_RDWR);
+        m_pOutput_pmem[i].fd = open (MEM_DEVICE,O_RDWR);
       }
 
       if(m_pOutput_pmem[i].fd < 0)
@@ -2519,6 +2701,7 @@ OMX_ERRORTYPE  omx_video::allocate_output_buffer(
         DEBUG_PRINT_ERROR("\nERROR: /dev/pmem_adsp open() failed");
         return OMX_ErrorInsufficientResources;
       }
+#endif
       m_pOutput_pmem[i].size = m_sOutPortDef.nBufferSize;
       m_pOutput_pmem[i].offset = 0;
       m_pOutput_pmem[i].buffer = (unsigned char *)mmap(NULL,m_pOutput_pmem[i].size,PROT_READ|PROT_WRITE,
@@ -2526,6 +2709,10 @@ OMX_ERRORTYPE  omx_video::allocate_output_buffer(
       if(m_pOutput_pmem[i].buffer == MAP_FAILED)
       {
         DEBUG_PRINT_ERROR("\nERROR: MMAP_FAILED in o/p alloc buffer");
+        close (m_pOutput_pmem[i].fd);
+#ifdef USE_ION
+        free_ion_memory(&m_pOutput_ion[i]);
+#endif
         return OMX_ErrorInsufficientResources;
       }
 
@@ -2586,6 +2773,11 @@ OMX_ERRORTYPE  omx_video::allocate_buffer(OMX_IN OMX_HANDLETYPE                h
   // What if the client calls again.
   if(port == PORT_INDEX_IN)
   {
+#ifdef _ANDROID_ICS_
+    if(meta_mode_enable)
+      eRet = allocate_input_meta_buffer(bufferHdr,appData,bytes);
+    else
+#endif
     eRet = allocate_input_buffer(hComp,bufferHdr,port,appData,bytes);
   }
   else if(port == PORT_INDEX_OUT)
@@ -2702,7 +2894,11 @@ OMX_ERRORTYPE  omx_video::free_buffer(OMX_IN OMX_HANDLETYPE         hComp,
       m_sInPortDef.bPopulated = OMX_FALSE;
 
       /*Free the Buffer Header*/
-      if(release_input_done())
+      if(release_input_done()
+#ifdef _ANDROID_ICS_
+         && !meta_mode_enable
+#endif
+         )
       {
         input_use_buffer = false;
         if(m_inp_mem_ptr)
@@ -2717,7 +2913,14 @@ OMX_ERRORTYPE  omx_video::free_buffer(OMX_IN OMX_HANDLETYPE         hComp,
           free(m_pInput_pmem);
           m_pInput_pmem = NULL;
         }
-
+#ifdef USE_ION
+        if(m_pInput_ion)
+        {
+          DEBUG_PRINT_LOW("Freeing m_pInput_ion\n");
+          free(m_pInput_ion);
+          m_pInput_ion = NULL;
+        }
+#endif
       }
     }
     else
@@ -2765,6 +2968,14 @@ OMX_ERRORTYPE  omx_video::free_buffer(OMX_IN OMX_HANDLETYPE         hComp,
           free(m_pOutput_pmem);
           m_pOutput_pmem = NULL;
         }
+#ifdef USE_ION
+        if(m_pOutput_ion)
+        {
+          DEBUG_PRINT_LOW("Freeing m_pOutput_ion\n");
+          free(m_pOutput_ion);
+          m_pOutput_ion = NULL;
+        }
+#endif
       }
     }
     else
@@ -2923,8 +3134,68 @@ OMX_ERRORTYPE  omx_video::empty_this_buffer_proxy(OMX_IN OMX_HANDLETYPE         
     DEBUG_PRINT_ERROR("\nERROR: ETBProxy: Input flush in progress");
     return OMX_ErrorNone;
   }
+#ifdef _ANDROID_ICS_
+  if(meta_mode_enable)
+  {
+    encoder_media_buffer_type *media_buffer;
+    bool met_error = false;
+    media_buffer = (encoder_media_buffer_type *)meta_buffer_hdr[nBufIndex].pBuffer;
+    if(media_buffer)
+    {
+      if (media_buffer->buffer_type != kMetadataBufferTypeCameraSource &&
+          media_buffer->buffer_type != kMetadataBufferTypeGrallocSource) {
+          met_error = true;
+      } else {
+        if(media_buffer->buffer_type == kMetadataBufferTypeCameraSource)
+        {
+          if(media_buffer->meta_handle == NULL) {
+            met_error = true;
+          }
+          else if((media_buffer->meta_handle->numFds != 1 &&
+                   media_buffer->meta_handle->numInts != 2))
+          {
+            met_error = true;
+          }
+        }
+      }
+    } else {
+      met_error = true;
+    }
+    if(met_error)
+    {
+      DEBUG_PRINT_ERROR("\nERROR: Unkown source/metahandle in ETB call");
+      post_event ((unsigned int)buffer,0,OMX_COMPONENT_GENERATE_EBD);
+      return OMX_ErrorBadParameter;
+    }
 
+    struct pmem Input_pmem_info;
+    if(media_buffer->buffer_type == kMetadataBufferTypeCameraSource)
+    {
+      Input_pmem_info.buffer = media_buffer;
+      Input_pmem_info.fd = media_buffer->meta_handle->data[0];
+      Input_pmem_info.offset = media_buffer->meta_handle->data[1];
+      Input_pmem_info.size = media_buffer->meta_handle->data[2];
+      DEBUG_PRINT_LOW("ETB fd = %d, offset = %d, size = %d",Input_pmem_info.fd,
+                        Input_pmem_info.offset,
+                        Input_pmem_info.size);
+
+    } else {
+      private_handle_t *handle = (private_handle_t *)media_buffer->meta_handle;
+      Input_pmem_info.buffer = media_buffer;
+      Input_pmem_info.fd = handle->fd;
+      Input_pmem_info.offset = 0;
+      Input_pmem_info.size = handle->size;
+    }
+    if(dev_use_buf(&Input_pmem_info,PORT_INDEX_IN) != true) {
+      DEBUG_PRINT_ERROR("\nERROR: in dev_use_buf");
+      post_event ((unsigned int)buffer,0,OMX_COMPONENT_GENERATE_EBD);
+      return OMX_ErrorBadParameter;
+    }
+  }
+  else if(input_use_buffer && !m_use_input_pmem)
+#else
   if(input_use_buffer && !m_use_input_pmem)
+#endif
   {
     DEBUG_PRINT_LOW("\n Heap UseBuffer case, so memcpy the data");
     pmem_data_buf = (OMX_U8 *)m_pInput_pmem[nBufIndex].buffer;
@@ -2934,9 +3205,13 @@ OMX_ERRORTYPE  omx_video::empty_this_buffer_proxy(OMX_IN OMX_HANDLETYPE         
     DEBUG_PRINT_LOW("memcpy() done in ETBProxy for i/p Heap UseBuf");
   }
 
+
   if(dev_empty_buf(buffer, pmem_data_buf) != true)
   {
     DEBUG_PRINT_ERROR("\nERROR: ETBProxy: dev_empty_buf failed");
+#ifdef _ANDROID_ICS_
+    omx_release_meta_buffer(buffer);
+#endif
     post_event ((unsigned int)buffer,0,OMX_COMPONENT_GENERATE_EBD);
     /*Generate an async error and move to invalid state*/
     pending_input_buffers--;
@@ -3129,7 +3404,7 @@ OMX_ERRORTYPE  omx_video::component_role_enum(OMX_IN OMX_HANDLETYPE hComp,
   {
     if((0 == index) && role)
     {
-      strncpy((char *)role, "video_decoder.mpeg4",OMX_MAX_STRINGNAME_SIZE);
+      strlcpy((char *)role, "video_decoder.mpeg4",OMX_MAX_STRINGNAME_SIZE);
       DEBUG_PRINT_LOW("component_role_enum: role %s\n",role);
     }
     else
@@ -3141,7 +3416,7 @@ OMX_ERRORTYPE  omx_video::component_role_enum(OMX_IN OMX_HANDLETYPE hComp,
   {
     if((0 == index) && role)
     {
-      strncpy((char *)role, "video_decoder.h263",OMX_MAX_STRINGNAME_SIZE);
+      strlcpy((char *)role, "video_decoder.h263",OMX_MAX_STRINGNAME_SIZE);
       DEBUG_PRINT_LOW("component_role_enum: role %s\n",role);
     }
     else
@@ -3154,7 +3429,7 @@ OMX_ERRORTYPE  omx_video::component_role_enum(OMX_IN OMX_HANDLETYPE hComp,
   {
     if((0 == index) && role)
     {
-      strncpy((char *)role, "video_decoder.avc",OMX_MAX_STRINGNAME_SIZE);
+      strlcpy((char *)role, "video_decoder.avc",OMX_MAX_STRINGNAME_SIZE);
       DEBUG_PRINT_LOW("component_role_enum: role %s\n",role);
     }
     else
@@ -3167,7 +3442,7 @@ OMX_ERRORTYPE  omx_video::component_role_enum(OMX_IN OMX_HANDLETYPE hComp,
   {
     if((0 == index) && role)
     {
-      strncpy((char *)role, "video_decoder.vc1",OMX_MAX_STRINGNAME_SIZE);
+      strlcpy((char *)role, "video_decoder.vc1",OMX_MAX_STRINGNAME_SIZE);
       DEBUG_PRINT_LOW("component_role_enum: role %s\n",role);
     }
     else
@@ -3180,7 +3455,7 @@ OMX_ERRORTYPE  omx_video::component_role_enum(OMX_IN OMX_HANDLETYPE hComp,
   {
     if((0 == index) && role)
     {
-      strncpy((char *)role, "video_encoder.mpeg4",OMX_MAX_STRINGNAME_SIZE);
+      strlcpy((char *)role, "video_encoder.mpeg4",OMX_MAX_STRINGNAME_SIZE);
       DEBUG_PRINT_LOW("component_role_enum: role %s\n",role);
     }
     else
@@ -3192,7 +3467,7 @@ OMX_ERRORTYPE  omx_video::component_role_enum(OMX_IN OMX_HANDLETYPE hComp,
   {
     if((0 == index) && role)
     {
-      strncpy((char *)role, "video_encoder.h263",OMX_MAX_STRINGNAME_SIZE);
+      strlcpy((char *)role, "video_encoder.h263",OMX_MAX_STRINGNAME_SIZE);
       DEBUG_PRINT_LOW("component_role_enum: role %s\n",role);
     }
     else
@@ -3205,7 +3480,7 @@ OMX_ERRORTYPE  omx_video::component_role_enum(OMX_IN OMX_HANDLETYPE hComp,
   {
     if((0 == index) && role)
     {
-      strncpy((char *)role, "video_encoder.avc",OMX_MAX_STRINGNAME_SIZE);
+      strlcpy((char *)role, "video_encoder.avc",OMX_MAX_STRINGNAME_SIZE);
       DEBUG_PRINT_LOW("component_role_enum: role %s\n",role);
     }
     else
@@ -3467,6 +3742,8 @@ OMX_ERRORTYPE omx_video::fill_buffer_done(OMX_HANDLETYPE hComp,
 
   pending_output_buffers--;
 
+  extra_data_handle.create_extra_data(buffer);
+
   /* For use buffer we need to copy the data */
   if(m_pCallbacks.FillBufferDone)
   {
@@ -3500,6 +3777,7 @@ OMX_ERRORTYPE omx_video::empty_buffer_done(OMX_HANDLETYPE         hComp,
   }
 
   pending_input_buffers--;
+
   if(m_pCallbacks.EmptyBufferDone)
   {
     m_pCallbacks.EmptyBufferDone(hComp ,m_app_data, buffer);
@@ -3726,5 +4004,107 @@ OMX_ERRORTYPE omx_video::get_supported_profile_level(OMX_VIDEO_PARAM_PROFILELEVE
   DEBUG_PRINT_ERROR("get_parameter: OMX_IndexParamVideoProfileLevelQuerySupported for Input port returned Profile:%d, Level:%d\n",
                     profileLevelType->eProfile,profileLevelType->eLevel);
   return eRet;
+}
+
+#ifdef USE_ION
+int omx_video::alloc_map_ion_memory(int size,struct ion_allocation_data *alloc_data,
+                                    struct ion_fd_data *fd_data)
+{
+        struct venc_ion buf_ion_info;
+        int ion_device_fd =-1,rc=0;
+        if (size <=0 || !alloc_data || !fd_data) {
+		DEBUG_PRINT_ERROR("\nInvalid input to alloc_map_ion_memory");
+		return -EINVAL;
+	}
+        ion_device_fd = open (MEM_DEVICE,O_RDONLY|O_DSYNC);
+        if(ion_device_fd < 0)
+        {
+          DEBUG_PRINT_ERROR("\nERROR: ION Device open() Failed");
+          return ion_device_fd;
+        }
+        alloc_data->len = size;
+        alloc_data->align = 4096;
+        alloc_data->flags = 0x1 << MEM_HEAP_ID;
+        rc = ioctl(ion_device_fd,ION_IOC_ALLOC,alloc_data);
+        if(rc || !alloc_data->handle) {
+           DEBUG_PRINT_ERROR("\n ION ALLOC memory failed ");
+           alloc_data->handle =NULL;
+           close(ion_device_fd);
+           ion_device_fd = -1;
+           return ion_device_fd;
+        }
+        fd_data->handle = alloc_data->handle;
+        rc = ioctl(ion_device_fd,ION_IOC_MAP,fd_data);
+        if(rc) {
+            DEBUG_PRINT_ERROR("\n ION MAP failed ");
+            buf_ion_info.ion_alloc_data = *alloc_data;
+            buf_ion_info.ion_device_fd = ion_device_fd;
+            buf_ion_info.fd_ion_data = *fd_data;
+            free_ion_memory(&buf_ion_info);
+            fd_data->fd =-1;
+            ion_device_fd =-1;
+        }
+        return ion_device_fd;
+}
+
+void omx_video::free_ion_memory(struct venc_ion *buf_ion_info)
+{
+     if (!buf_ion_info) {
+        DEBUG_PRINT_ERROR("\n Invalid input to free_ion_memory");
+	return;
+     }
+     if (ioctl(buf_ion_info->ion_device_fd,ION_IOC_FREE,
+              &buf_ion_info->ion_alloc_data.handle)) {
+         DEBUG_PRINT_ERROR("\n ION free failed ");
+         return;
+     }
+     close(buf_ion_info->ion_device_fd);
+     buf_ion_info->ion_alloc_data.handle = NULL;
+     buf_ion_info->ion_device_fd = -1;
+     buf_ion_info->fd_ion_data.fd = -1;
+}
+
+#endif
+#endif
+#ifdef _ANDROID_ICS_
+void omx_video::omx_release_meta_buffer(OMX_BUFFERHEADERTYPE *buffer)
+{
+  if(buffer && meta_mode_enable)
+  {
+    encoder_media_buffer_type *media_ptr;
+    struct pmem Input_pmem;
+    bool meta_error = false;
+    media_ptr = (encoder_media_buffer_type *) buffer->pBuffer;
+    if(media_ptr && media_ptr->meta_handle)
+    {
+      if(media_ptr->buffer_type == kMetadataBufferTypeCameraSource &&
+         media_ptr->meta_handle->numFds == 1 &&
+         media_ptr->meta_handle->numInts == 2) {
+        Input_pmem.fd = media_ptr->meta_handle->data[0];
+        Input_pmem.buffer = media_ptr;
+        Input_pmem.size = media_ptr->meta_handle->data[2];
+        Input_pmem.offset = media_ptr->meta_handle->data[1];
+        DEBUG_PRINT_LOW("EBD fd = %d, offset = %d, size = %d",Input_pmem.fd,
+                          Input_pmem.offset,
+                          Input_pmem.size);
+      } else if(media_ptr->buffer_type == kMetadataBufferTypeGrallocSource) {
+        private_handle_t *handle = (private_handle_t *)media_ptr->meta_handle;
+        Input_pmem.buffer = media_ptr;
+        Input_pmem.fd = handle->fd;
+        Input_pmem.offset = 0;
+        Input_pmem.size = handle->size;
+      } else {
+        meta_error = true;
+        DEBUG_PRINT_ERROR(" Meta Error set in EBD");
+      }
+      if(!meta_error)
+         meta_error = !dev_free_buf(&Input_pmem,PORT_INDEX_IN);
+        if(meta_error)
+        {
+         DEBUG_PRINT_ERROR(" Warning dev_free_buf failed flush value is %d",
+             input_flush_progress);
+        }
+      }
+    }
 }
 #endif

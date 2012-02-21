@@ -1,5 +1,5 @@
 /*--------------------------------------------------------------------------
-Copyright (c) 2010, Code Aurora Forum. All rights reserved.
+Copyright (c) 2010-2011, Code Aurora Forum. All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -45,7 +45,10 @@ static unsigned char H263_start_code[4] = {0x00,0x00,0x80,0x00};
 static unsigned char H263_mask_code[4] = {0xFF,0xFF,0xFC,0x00};
 
 static unsigned char VC1_AP_start_code[4] = {0x00,0x00,0x01,0x0C};
-static unsigned char VC1_AP_mask_code[4] = {0xFF,0xFF,0xFF,0xFE};
+static unsigned char VC1_AP_mask_code[4] = {0xFF,0xFF,0xFF,0xFC};
+
+static unsigned char MPEG2_start_code[4] = {0x00, 0x00, 0x01, 0x00};
+static unsigned char MPEG2_mask_code[4] = {0xFF, 0xFF, 0xFF, 0xFF};
 
 frame_parse::frame_parse():parse_state(A0),
                            last_byte_h263(0),
@@ -55,7 +58,9 @@ frame_parse::frame_parse():parse_state(A0),
                            bytes_tobeparsed(0),
                            mutils(NULL),
                            start_code(NULL),
-                           mask_code(NULL)
+                           mask_code(NULL),
+                           header_found(false),
+                           skip_frame_boundary(false)
 {
 }
 
@@ -70,7 +75,7 @@ frame_parse::~frame_parse ()
 int frame_parse::init_start_codes (codec_type codec_type_parse)
 {
 	/*Check if Codec Type is proper and we are in proper state*/
-	if (codec_type_parse > CODEC_TYPE_VC1 || parse_state != A0)
+	if (codec_type_parse > CODEC_TYPE_MAX || parse_state != A0)
 	{
 	  return -1;
 	}
@@ -93,7 +98,11 @@ int frame_parse::init_start_codes (codec_type codec_type_parse)
 		start_code = VC1_AP_start_code;
 		mask_code = VC1_AP_mask_code;
 		break;
-	}
+        case CODEC_TYPE_MPEG2:
+                start_code = MPEG2_start_code;
+                mask_code = MPEG2_mask_code;
+                break;
+        }
 	return 1;
 }
 
@@ -161,9 +170,12 @@ int frame_parse::parse_sc_frame ( OMX_BUFFERHEADERTYPE *source,
         else
         {
             memcpy (pdest,start_code,4);
-            if (start_code == VC1_AP_start_code)
+            if (start_code == VC1_AP_start_code
+                || start_code == MPEG4_start_code
+                || start_code == MPEG2_start_code)
             {
                 pdest[3] = last_byte;
+                update_skip_frame();
             }
             dest->nFilledLen += 4;
             pdest += 4;
@@ -179,7 +191,14 @@ int frame_parse::parse_sc_frame ( OMX_BUFFERHEADERTYPE *source,
         //printf ("\n In the Entry Loop");
         switch (parse_state)
         {
-         case A3:
+        case A3:
+            parse_additional_start_code(psource,&parsed_length);
+            if (parse_state == A4) {
+                source->nFilledLen--;
+                source->nOffset++;
+                psource++;
+                break;
+            }
              /*If fourth Byte is matching then start code is found*/
              if ((*psource & mask_code [3]) == start_code [3])
              {
@@ -295,6 +314,7 @@ int frame_parse::parse_sc_frame ( OMX_BUFFERHEADERTYPE *source,
      if (parse_state == A4 || parse_state == A5)
      {
          *partialframe = 0;
+         check_skip_frame_boundary(partialframe);
          DEBUG_PRINT_LOW("\n FrameParser: Parsed Len = %d", dest->nFilledLen);
          return 1;
      }
@@ -382,6 +402,9 @@ int frame_parse::parse_sc_frame ( OMX_BUFFERHEADERTYPE *source,
 
           break;
       case A3:
+          parse_additional_start_code(psource,&parsed_length);
+          if (parse_state == A4) break;
+
           if ((psource [parsed_length] & mask_code [3]) == start_code [3])
           {
             last_byte = psource [parsed_length];
@@ -416,6 +439,7 @@ int frame_parse::parse_sc_frame ( OMX_BUFFERHEADERTYPE *source,
     {
     case A5:
       *partialframe = 0;
+      check_skip_frame_boundary(partialframe);
       if (parsed_length > 3)
       {
         memcpy (pdest,psource,(parsed_length-3));
@@ -424,6 +448,7 @@ int frame_parse::parse_sc_frame ( OMX_BUFFERHEADERTYPE *source,
       break;
     case A4:
       *partialframe = 0;
+      check_skip_frame_boundary(partialframe);
       if (parsed_length > 4)
       {
         memcpy (pdest,psource,(parsed_length-4));
@@ -571,4 +596,57 @@ void frame_parse::flush ()
     state_nal = NAL_LENGTH_ACC;
     accum_length = 0;
     bytes_tobeparsed = 0;
+    header_found = false;
+    skip_frame_boundary = false;
+}
+
+void frame_parse::parse_additional_start_code(OMX_U8 *psource,
+                OMX_U32 *parsed_length)
+{
+
+    if (((start_code == MPEG4_start_code) ||
+        (start_code == MPEG2_start_code)) &&
+        psource &&
+        parsed_length)
+    {
+        OMX_U32 index = *parsed_length;
+        if ((start_code == MPEG4_start_code &&
+            (psource [index] & 0xF0) == 0x20) ||
+            (start_code == MPEG2_start_code &&
+            psource [index] == 0xB3))
+        {
+            if (header_found)
+            {
+                last_byte = psource [index];
+                index++;
+                parse_state = A4;
+            } else
+                header_found = true;
+        }
+        *parsed_length = index;
+    }
+}
+
+void frame_parse::check_skip_frame_boundary(OMX_U32 *partialframe)
+{
+    if ((start_code == MPEG4_start_code ||
+          start_code == MPEG2_start_code) &&
+          partialframe) {
+
+        *partialframe = 1;
+        if (!skip_frame_boundary)
+           *partialframe = 0;
+        skip_frame_boundary = false;
+    }
+}
+
+void frame_parse::update_skip_frame()
+{
+    if (((start_code == MPEG4_start_code) &&
+        ((last_byte & 0xF0) == 0x20)) ||
+        ((start_code == MPEG2_start_code) &&
+        (last_byte == 0xB3))) {
+
+        skip_frame_boundary = true;
+    }
 }
