@@ -1,8 +1,3 @@
-# Copyright 2011 The Android Open Source Project
-
-#AUDIO_POLICY_TEST := true
-#ENABLE_AUDIO_DUMP := true
-
 LOCAL_PATH := $(call my-dir)
 include $(CLEAR_VARS)
 
@@ -49,7 +44,6 @@ LOCAL_C_INCLUDES += frameworks/base/include
 LOCAL_C_INCLUDES += system/core/include
 
 include $(BUILD_SHARED_LIBRARY)
-
 
 # The audio policy is implemented on top of legacy policy code
 include $(CLEAR_VARS)

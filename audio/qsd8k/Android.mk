@@ -4,8 +4,6 @@ ifneq ($(BUILD_TINY_ANDROID),true)
 LOCAL_PATH := $(call my-dir)
 include $(CLEAR_VARS)
 
-ifneq ($(BOARD_USES_QCOM_LEGACY),true)
-
 LOCAL_MODULE:= audio_policy.$(TARGET_BOARD_PLATFORM)
 LOCAL_MODULE_PATH := $(TARGET_OUT_SHARED_LIBRARIES)/hw
 LOCAL_STATIC_LIBRARIES := libmedia_helper
@@ -24,7 +22,6 @@ ifeq ($(BOARD_HAVE_BLUETOOTH),true)
 endif
 
 include $(BUILD_SHARED_LIBRARY)
-
 
 include $(CLEAR_VARS)
 
@@ -50,8 +47,6 @@ LOCAL_CFLAGS += -fno-short-enums
 #endif
 
 include $(BUILD_SHARED_LIBRARY)
-
-endif
 
 endif # not BUILD_TINY_ANDROID
 

@@ -1,12 +1,5 @@
-# Copyright 2011 The Android Open Source Project
-
-#AUDIO_POLICY_TEST := true
-#ENABLE_AUDIO_DUMP := true
-
 LOCAL_PATH := $(call my-dir)
 include $(CLEAR_VARS)
-
-ifneq ($(BOARD_USES_QCOM_LEGACY),true)
 
 ifeq ($(BOARD_USES_QCOM_HARDWARE),true)
     LOCAL_CFLAGS += -DQCOM_HARDWARE
@@ -72,7 +65,6 @@ LOCAL_C_INCLUDES += system/core/include
 
 include $(BUILD_SHARED_LIBRARY)
 
-
 # The audio policy is implemented on top of legacy policy code
 include $(CLEAR_VARS)
 
@@ -104,5 +96,3 @@ endif
 LOCAL_C_INCLUDES := hardware/libhardware_legacy/audio
 
 include $(BUILD_SHARED_LIBRARY)
-
-endif
