@@ -595,6 +595,10 @@ audio_io_handle_t AudioPolicyManager::getSession(AudioSystem::stream_type stream
         delete outputDesc;
         return 0;
     }
+
+    //reset it here, it will get updated in startoutput
+    outputDesc->mDevice = 0;
+
     mOutputs.add(output, outputDesc);
     mLPADecodeOutput = output;
     mLPAStreamType   = stream;
