@@ -36,7 +36,9 @@ LOCAL_MODULE_TAGS := optional
 LOCAL_CFLAGS += -fno-short-enums
 
 LOCAL_C_INCLUDES += $(TARGET_OUT_HEADERS)/mm-audio/audio-alsa
-LOCAL_C_INCLUDES += $(TARGET_OUT_HEADERS)/mm-audio/audcal
+ifeq ($(BOARD_USES_QCOM_AUDIO_CALIBRATION),true)
+    LOCAL_C_INCLUDES += $(TARGET_OUT_HEADERS)/mm-audio/audcal
+endif
 LOCAL_C_INCLUDES += $(TARGET_OUT_HEADERS)/mm-audio/audio-acdb-util
 LOCAL_C_INCLUDES += hardware/libhardware/include
 LOCAL_C_INCLUDES += hardware/libhardware_legacy/include
