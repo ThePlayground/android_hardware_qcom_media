@@ -969,16 +969,12 @@ AudioStreamOut* AudioHardware::openOutputStream(
         // only one output stream allowed
 #ifdef QCOM_VOIP
         if (mOutput && (devices != AudioSystem::DEVICE_OUT_DIRECTOUTPUT)) {
-#else
-        if (mOutput) {
-#endif
             if (status) {
                 *status = INVALID_OPERATION;
             }
             LOGE(" AudioHardware::openOutputStream Only one output stream allowed \n");
             return 0;
         }
-#ifdef QCOM_VOIP
         if(devices == AudioSystem::DEVICE_OUT_DIRECTOUTPUT) {
             // open direct output stream
             LOGV(" AudioHardware::openOutputStream Direct output stream \n");
@@ -1018,11 +1014,11 @@ AudioStreamOut* AudioHardware::openOutputStream(
             } else {
                 delete out;
             }
-            return mOutput;
 #ifdef QCOM_VOIP
         }
 #endif
     }
+    return mOutput;
 }
 
 
