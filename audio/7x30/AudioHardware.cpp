@@ -159,7 +159,7 @@ typedef struct routing_table
     int stream_type;
     bool active;
     struct routing_table *next;
-} Routing_table;
+}Routing_table;
 Routing_table* head;
 Mutex       mRoutingTableLock;
 
