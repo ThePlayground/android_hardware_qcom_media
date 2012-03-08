@@ -13,6 +13,10 @@ ifeq ($(BOARD_HAVE_BLUETOOTH),true)
     LOCAL_CFLAGS += -DWITH_A2DP
 endif
 
+ifeq ($(BOARD_HAVE_FM_RADIO),true)
+  LOCAL_CFLAGS += -DFM_RADIO
+endif
+
 ifeq ($(BOARD_USES_QCOM_AUDIO_LPA),true)
     LOCAL_CFLAGS += -DWITH_QCOM_LPA
 endif

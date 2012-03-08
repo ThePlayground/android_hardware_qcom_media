@@ -18,6 +18,26 @@ ifeq ($(BOARD_HAVE_BLUETOOTH),true)
   LOCAL_CFLAGS += -DWITH_A2DP
 endif
 
+ifeq ($(BOARD_HAVE_FM_RADIO),true)
+  LOCAL_CFLAGS += -DFM_RADIO
+endif
+
+ifeq ($(BOARD_USES_QCOM_AUDIO_LPA),true)
+    LOCAL_CFLAGS += -DWITH_QCOM_LPA
+endif
+
+ifeq ($(BOARD_USES_QCOM_AUDIO_SPEECH),true)
+    LOCAL_CFLAGS += -DWITH_QCOM_SPEECH
+endif
+
+ifeq ($(BOARD_USES_QCOM_AUDIO_VOIPMUTE),true)
+    LOCAL_CFLAGS += -DWITH_QCOM_VOIPMUTE
+endif
+
+ifeq ($(BOARD_USES_QCOM_AUDIO_RESETALL),true)
+    LOCAL_CFLAGS += -DWITH_QCOM_RESETALL
+endif
+
 LOCAL_SHARED_LIBRARIES := \
     libcutils       \
     libutils        \
@@ -73,6 +93,10 @@ LOCAL_MODULE_TAGS := optional
 
 ifeq ($(BOARD_HAVE_BLUETOOTH),true)
   LOCAL_CFLAGS += -DWITH_A2DP
+endif
+
+ifeq ($(BOARD_USES_QCOM_AUDIO_LPA),true)
+    LOCAL_CFLAGS += -DWITH_QCOM_LPA
 endif
 
 LOCAL_C_INCLUDES += hardware/libhardware_legacy/audio
