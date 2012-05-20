@@ -63,6 +63,7 @@ extern "C" {
 #define FM_FILE_REC 2
 
 #define VOICE_SESSION_NAME "Voice session"
+#define VOIP_SESSION_NAME "VoIP session"
 
 namespace android_audio_legacy {
 
@@ -1011,6 +1012,7 @@ AudioStreamIn* AudioHardware::openInputStream(
     }
 
     mLock.lock();
+#ifndef NO_QCOM_MVS
     if(devices == AudioSystem::DEVICE_IN_COMMUNICATION) {
         LOGE("Create Audio stream Voip \n");
         AudioStreamInVoip* inVoip = new AudioStreamInVoip();
@@ -1029,6 +1031,7 @@ AudioStreamIn* AudioHardware::openInputStream(
         mLock.unlock();
         return inVoip;
     } else {
+#endif
         AudioStreamInMSM72xx* in72xx = new AudioStreamInMSM72xx();
         status_t lStatus = in72xx->set(this, devices, format, channels, sampleRate, acoustic_flags);
         if (status) {
@@ -1043,7 +1046,9 @@ AudioStreamIn* AudioHardware::openInputStream(
         mInputs.add(in72xx); 
         mLock.unlock();
         return in72xx;
+#ifndef NO_QCOM_MVS
     }
+#endif
 }
 
 void AudioHardware::closeInputStream(AudioStreamIn* in) {
